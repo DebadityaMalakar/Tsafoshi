@@ -412,3 +412,5 @@ NASM-isms; FASM will build this with some edits.
 ## License
 
 MIT — see [LICENSE](LICENSE). Every source file carries an SPDX identifier.
+
+Copyright (c) 2026 Debaditya Malakar <debadityamalakar@gmail.com>.
