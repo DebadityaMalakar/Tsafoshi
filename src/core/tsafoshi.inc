@@ -34,4 +34,37 @@ TK_BAD              equ 9
 TK_OP_FIRST         equ TK_PLUS
 TK_OP_LAST          equ TK_PERCENT
 
+; Binding strength, higher binds tighter. The gaps are deliberate: these are
+; the C99 levels, so shifts, comparisons and the bitwise operators drop into
+; 5 .. 8 later without renumbering anything that already exists.
+PREC_LOGOR          equ 1
+PREC_LOGAND         equ 2
+PREC_BITOR          equ 3
+PREC_BITXOR         equ 4
+PREC_BITAND         equ 5
+PREC_EQUALITY       equ 6
+PREC_RELATIONAL     equ 7
+PREC_SHIFT          equ 8
+PREC_ADDITIVE       equ 9
+PREC_MULTIPLICATIVE equ 10
+
+PREC_LOWEST         equ PREC_LOGOR
+
+; AST node kinds.
+NT_NUM              equ 0
+NT_UNARY            equ 1
+NT_BINARY           equ 2
+
+; AST node layout. Five cells; see "The 64-bit cell rule". NODE_VAL holds the
+; literal for NT_NUM and the operator's token kind otherwise, and NT_UNARY
+; keeps its single operand in NODE_LHS.
+NODE_KIND           equ 0
+NODE_VAL            equ CELL
+NODE_LHS            equ CELL * 2
+NODE_RHS            equ CELL * 3
+NODE_POS            equ CELL * 4
+NODE_SIZE           equ CELL * 5
+
+AST_CAP             equ 4096            ; nodes per line, then "too complex"
+
 %endif

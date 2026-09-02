@@ -9,11 +9,14 @@
     extern  read_line
     extern  line_is_blank
     extern  is_quit
+    extern  mode_command
     extern  line_buf
     extern  lex_init
     extern  tok_kind
     extern  tok_pos
+    extern  ast_reset
     extern  parse_expression
+    extern  ast_eval
     extern  print_result
     extern  err_code
     extern  err_reset
@@ -43,8 +46,12 @@ repl_main:
     call    line_is_blank
     test    rax, rax
     jnz     .loop
+    call    mode_command
+    test    rax, rax
+    jnz     .loop
 
     call    err_reset
+    call    ast_reset
     lea     rdi, [line_buf]
     call    lex_init
     call    parse_expression
@@ -53,6 +60,11 @@ repl_main:
 
     cmp     qword [tok_kind], TK_EOF    ; the whole line must be consumed
     jne     .trailing
+
+    mov     rdi, rax                    ; parse built a tree; now walk it
+    call    ast_eval
+    cmp     qword [err_code], 0
+    jne     .error
 
     call    print_result
     jmp     .loop
@@ -76,9 +88,9 @@ repl_main:
     section .data
 
 msg_banner:
-    db      "Tsafoshi 0.1 -- stage 0: left-to-right calculator", 10
-    db      "no operator precedence yet: 2 + 3 * 4 is 20", 10
-    db      "type an expression, or 'quit' to leave", 10, 10
+    db      "Tsafoshi 0.2 -- stage 1: precedence climbing over a syntax tree", 10
+    db      "* / % bind tighter than + -, and parentheses override both", 10
+    db      "type an expression, 'mode' to change that, or 'quit' to leave", 10, 10
 .len                equ $ - msg_banner
 msg_prompt:
     db      "tsafoshi> "

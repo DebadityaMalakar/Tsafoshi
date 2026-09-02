@@ -1,14 +1,22 @@
 ; SPDX-License-Identifier: MIT
 ;
-; Recursive descent over the lexer's one-token lookahead.
+; Recursive descent with precedence climbing, over the lexer's one-token
+; lookahead. The parser produces a tree and never a value:
 ;
-; expression := unary ( binop unary )*     folded left, no precedence
+; expression := binary(PREC_LOWEST)
+; binary(p)  := unary ( binop(q >= p) binary(q + 1) )*
 ; unary      := ("-" | "+")* primary
 ; primary    := NUM | "(" expression ")"
 ;
-; Structure only: every value is produced by op.asm. Each rule returns its
-; result in rax; on failure it records an error and returns, and callers
-; re-check err_code and unwind the same way.
+; One loop covers every binary level. Adding a level means adding tokens and a
+; row to the table in op.asm; nothing here changes. The "q + 1" on the
+; recursive call is what makes operators left-associative: an operator of equal
+; strength does not bind into the right operand, so it falls out to the loop
+; and folds leftward instead. mode.asm supplies both the table and that bump,
+; so switching convention changes no code here.
+;
+; Each rule returns a node in rax; on failure it records an error and returns
+; zero, and callers re-check err_code and unwind the same way.
 
 %include "tsafoshi.inc"
 
@@ -18,54 +26,70 @@
     extern  tok_kind
     extern  tok_val
     extern  tok_pos
-    extern  op_apply
-    extern  op_neg
+    extern  mode_prec
+    extern  mode_bump
+    extern  ast_num
+    extern  ast_unary
+    extern  ast_binary
     extern  err_code
     extern  err_expected
     extern  err_unclosed
 
     section .text
 
-; -> rax.  rbx = accumulator, r12 = operator kind, r13 = its column
+; -> rax
 parse_expression:
+    mov     edi, PREC_LOWEST
+    ; fall through
+
+; rdi = lowest precedence this call may absorb -> rax
+; rbx = left node, r12 = that floor, r13 = operator kind, r14 = its column
+parse_binary:
     push    rbx
     push    r12
     push    r13
+    push    r14
+    mov     r12, rdi
     call    parse_unary
     cmp     qword [err_code], 0
     jne     .fail
     mov     rbx, rax
 
 .next:
-    mov     rax, [tok_kind]
-    cmp     rax, TK_OP_FIRST
-    jb      .done
-    cmp     rax, TK_OP_LAST
-    ja      .done
+    mov     rdi, [tok_kind]
+    call    mode_prec
+    test    rax, rax                    ; not a binary operator: we are done
+    jz      .done
+    cmp     rax, r12
+    jb      .done                       ; binds looser than our caller allows
 
-    mov     r12, rax
-    mov     r13, [tok_pos]
+    mov     r13, [tok_kind]
+    mov     r14, [tok_pos]
+    add     rax, [mode_bump]            ; +1 folds left, +0 folds right
+    push    rax                         ; the right operand's floor
     call    lex_next
-    call    parse_unary
+    pop     rdi
+    call    parse_binary
     cmp     qword [err_code], 0
     jne     .fail
 
-    mov     rsi, rax
-    mov     rdi, rbx
-    mov     rdx, r12
-    mov     rcx, r13
-    call    op_apply
-    cmp     qword [err_code], 0
-    jne     .fail
+    mov     rdx, rax
+    mov     rdi, r13
+    mov     rsi, rbx
+    mov     rcx, r14
+    call    ast_binary
+    test    rax, rax
+    jz      .fail
     mov     rbx, rax
     jmp     .next
 
-.fail:
-    xor     eax, eax
-    jmp     .out
 .done:
     mov     rax, rbx
+    jmp     .out
+.fail:
+    xor     eax, eax
 .out:
+    pop     r14
     pop     r13
     pop     r12
     pop     rbx
@@ -79,13 +103,22 @@ parse_unary:
     je      .plus
     jmp     parse_primary
 .plus:
-    call    lex_next
+    call    lex_next                    ; unary plus has no effect, and no node
     jmp     parse_unary
 .negate:
+    push    qword [tok_pos]
     call    lex_next
     call    parse_unary
-    mov     rdi, rax
-    jmp     op_neg                      ; harmless if an error already fired
+    cmp     qword [err_code], 0
+    jne     .fail
+    mov     rsi, rax
+    pop     rdx
+    mov     edi, TK_MINUS
+    jmp     ast_unary
+.fail:
+    pop     rdx
+    xor     eax, eax
+    ret
 
 parse_primary:
     mov     rax, [tok_kind]
@@ -99,7 +132,12 @@ parse_primary:
     ret
 
 .number:
-    push    qword [tok_val]
+    mov     rdi, [tok_val]
+    mov     rsi, [tok_pos]
+    call    ast_num
+    test    rax, rax
+    jz      .zero
+    push    rax
     call    lex_next
     pop     rax
     ret

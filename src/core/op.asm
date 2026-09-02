@@ -1,8 +1,9 @@
 ; SPDX-License-Identifier: MIT
 ;
-; Operator semantics. The parser decides structure; every value actually
-; produced comes from here. Dispatch is a jump table indexed by token kind,
-; which is the same shape the bytecode VM will want later.
+; Operators: what they mean, and how tightly they bind. The parser decides
+; structure and eval.asm decides order, but every value actually produced
+; comes from here. Dispatch is a jump table indexed by token kind, which is
+; the same shape the bytecode VM will want later.
 
 %include "tsafoshi.inc"
 

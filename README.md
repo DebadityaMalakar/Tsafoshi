@@ -6,15 +6,19 @@ A **C99** interpreter written in x86-64 assembly. No compiler backend, no code
 generation, no ABI to fight — C source goes in, behaviour comes out. The host
 is hand-written assembly the whole way down.
 
-This is stage 0. Right now it is a calculator.
+This is stage 1. Right now it is a calculator that parses to a syntax tree.
 
 ```
+tsafoshi> 2 + 3 * 4
+= 14
+tsafoshi> mode ltr
+mode: ltr
 tsafoshi> 2 + 3 * 4
 = 20
 ```
 
-Twenty, not fourteen. That is not a bug — see [Left to right, on
-purpose](#left-to-right-on-purpose).
+BODMAS by default, and the order is switchable — see [Order of
+operations](#order-of-operations).
 
 ---
 
@@ -62,7 +66,8 @@ assistance, not as reviewed, production-grade work.
 | Stage | What it does | State |
 |---|---|---|
 | **0** | Tokenizer, recursive-descent parser, left-to-right evaluation, 64-bit signed ints | **done** |
-| 1 | Precedence climbing, an AST, a bytecode disassembler | next |
+| **1** | Precedence climbing, an AST, switchable evaluation order | **done** |
+| 1.5 | Bytecode: compile the tree, then run it in a dispatch loop | next |
 | 2 | Variables, assignment, `if` / `while`, the VM call stack | |
 | 3 | Functions, pointers, arrays, `struct` | |
 | 4 | Native call bridge — `printf` starts working | |
@@ -82,7 +87,7 @@ What choosing C99 specifically commits us to, beyond C89:
 
 | | |
 |---|---|
-| `//` comments | lexer, stage 1 |
+| `//` comments | lexer, stage 2 |
 | Declarations anywhere in a block, and in `for` init | parser + scoping, stage 2 |
 | `long long`, `_Bool`, `<stdbool.h>`, `<stdint.h>` | type system, stage 3 |
 | Designated initializers, compound literals | stage 6 |
@@ -186,6 +191,11 @@ tsafoshi> (2 + 3) * 4
 = 20
 tsafoshi> -7 % 3
 = -1
+tsafoshi> mode
+mode: bodmas
+  bodmas  brackets, then * / %, then + -
+  ltr     one flat level, folded left to right
+  rtl     one flat level, folded right to left
 tsafoshi> 4 / 0
             ^
 error: division by zero
@@ -196,22 +206,53 @@ tsafoshi> quit
 ```
 
 Operators: `+ - * / %`, unary `-` and `+`, and parentheses. Values are 64-bit
-signed and wrap silently on overflow. `quit`, `exit`, `q` or EOF (Ctrl+D /
-Ctrl+Z) ends the session.
+signed and wrap silently on overflow. `mode` reports or changes the evaluation
+order; `quit`, `exit`, `q` or EOF (Ctrl+D / Ctrl+Z) ends the session.
 
-## Left to right, on purpose
+## Order of operations
 
-Stage 0 folds every binary operator left to right with no precedence at all:
+The default is **BODMAS**: brackets first, then `* / %`, then `+ -`, with
+equal-strength operators folded left. That is also exactly what C99 specifies
+for these operators, so the default needs no apology and will not have to
+change when the rest of the language arrives.
+
+The order is a runtime setting rather than a fact baked into the parser:
+
+| `mode` | Rule | `2 + 3 * 4` | `2 - 3 - 4` |
+|---|---|---|---|
+| `bodmas` | brackets, then `* / %`, then `+ -`; folds left | `14` | `-5` |
+| `ltr` | one flat level, folded left to right | `20` | `-5` |
+| `rtl` | one flat level, folded right to left | `14` | `3` |
+
+`ltr` is the stage-0 behaviour kept as a mode: no precedence at all, so
+parentheses are the only way to regroup. `rtl` is the APL rule — still no
+precedence, but a run of equal operators folds from the right, which is why
+`2 - 3 - 4` becomes `2 - (3 - 4)`.
+
+Parentheses win under every mode. They are structural, handled in
+`parse_primary`, and never consult the table.
+
+### How the switch works
+
+`parser.asm` asks `mode.asm` two questions and holds no opinion of its own:
 
 ```
-2 + 3 * 4   ->   (2 + 3) * 4   ->   20
+mode_prec(kind)   ->  how tightly this operator binds, 0 if it is not one
+mode_bump         ->  1 to fold left, 0 to fold right
 ```
 
-Parentheses are the only way to regroup. This is not laziness, it is the
-smallest thing that is still a real front end — a tokenizer, a
-recursive-descent parser, a separate semantics layer, error positions with a
-caret, and a REPL sitting on a platform abstraction. Stage 1 replaces the flat
-fold in `parser.asm` with precedence climbing; nothing else has to move.
+Precedence climbing turns both into one loop. After reading an operator of
+strength `q`, the parser parses the right operand with a floor of
+`q + mode_bump`. With the bump at 1 an equally strong operator is refused on
+the right, falls out to the loop, and folds leftward; with the bump at 0 it is
+accepted and folds rightward. A mode is therefore a five-byte precedence row
+plus that one flag, and the two flat modes are the same row with different
+bumps.
+
+Adding the rest of C99's binary operators means adding tokens and widening
+those rows. The `PREC_*` ladder in `tsafoshi.inc` is already numbered for it:
+shifts, comparisons, equality and the bitwise operators have their C99 levels
+reserved at 5 through 8, so nothing that already exists gets renumbered.
 
 ## Layout
 
@@ -223,8 +264,11 @@ src/
     repl.asm            the read-eval-print loop
     readline.asm        buffered line input
     lexer.asm           source text -> tokens
-    parser.asm          tokens -> values (structure)
+    parser.asm          tokens -> a syntax tree (structure only)
+    ast.asm             node storage: one arena, reset per line
+    eval.asm            tree -> value (order only)
     op.asm              operator semantics (values)
+    mode.asm            evaluation order, and the "mode" command
     error.asm           diagnostics and the caret
     format.asm          number formatting, output helpers
   linux/input.asm       I/O primitives, Linux syscalls
@@ -249,12 +293,28 @@ The build is `src/main.asm` plus `src/core/*.asm` plus exactly one
 | Seam | Interface |
 |---|---|
 | lexer → parser | `lex_init`, `lex_next`, and one token of lookahead in `tok_kind` / `tok_val` / `tok_pos` |
-| parser → op | `op_apply(lhs, rhs, kind, pos)` — the parser decides structure, `op.asm` produces every value |
-| anything → error | `err_expected` / `err_unclosed` / `err_divzero` / `err_trailing`, each taking a position |
+| parser → ast | `ast_num` / `ast_unary` / `ast_binary`, each returning a node or zero |
+| parser → mode | `mode_prec(kind)` and `mode_bump` — the parser never hardcodes an order |
+| eval → op | `op_apply(lhs, rhs, kind, pos)` — `eval.asm` decides order, `op.asm` produces every value |
+| anything → error | `err_expected` / `err_unclosed` / `err_divzero` / `err_trailing` / `err_toobig`, each taking a position |
 | core → platform | the four `sys_*` routines below |
 
-`op_apply` dispatches through a jump table indexed by token kind. That is
-deliberately the same shape the stage-1 bytecode VM will want.
+The tree is the seam that matters. The parser builds nodes and never computes
+a value; `eval.asm` walks nodes and never looks at a token. Neither knows how
+the other works, which is what makes the next stage a local change — a
+bytecode compiler is a second consumer of the same tree, sitting exactly where
+`ast_eval` sits now.
+
+Both `op_apply` and `ast_eval` dispatch through a jump table, indexed by token
+kind and by node kind respectively. That is deliberately the same shape the
+bytecode VM's inner loop will want.
+
+Nodes come out of a bump-allocated arena that the REPL resets once per line,
+so a tree costs one pointer bump per node and nothing at all to free. Running
+out raises `expression too complex`; with `AST_CAP` at 4096 nodes and
+`LINE_CAP` at 1024 bytes a single line cannot actually reach it, so it is a
+guard for the multi-line input that arrives with the preprocessor rather than
+a limit you can hit today.
 
 ### The platform contract
 
@@ -338,6 +398,13 @@ Note the seam C99 forces here: *types* are always static, but with VLAs a
 so the scale on a pointer-arithmetic opcode cannot always be an immediate —
 some of them take it from the stack instead. That is a small extension to the
 opcode set, but only if the frame layout allowed for it from the start.
+
+**Why the order is switchable.** Precedence lives in a table because it was
+going to have to anyway — C99 has more than a dozen binary levels, and
+encoding those as control flow means a dozen nested rules to write and
+re-read. Once the table exists, an alternate convention costs one more row.
+Having three of them keeps the parser honest: no rule may assume a fixed
+order, because the order is not known until run time.
 
 **Assembler.** NASM. `%include`, `default rel` and the section syntax are
 NASM-isms; FASM will build this with some edits.

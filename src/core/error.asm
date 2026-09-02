@@ -10,6 +10,7 @@
     global  err_unclosed
     global  err_divzero
     global  err_trailing
+    global  err_toobig
     global  err_code
 
     extern  line_buf
@@ -38,6 +39,10 @@ err_divzero:
 err_trailing:
     lea     rsi, [e_trailing]
     mov     rdx, e_trailing.len
+    jmp     err_set
+err_toobig:
+    lea     rsi, [e_toobig]
+    mov     rdx, e_toobig.len
     ; fall through
 
 ; rsi = message, rdx = length, rdi = position. The first error on a line wins;
@@ -96,6 +101,9 @@ e_divzero:
 e_trailing:
     db      "unexpected trailing input"
 .len                equ $ - e_trailing
+e_toobig:
+    db      "expression too complex"
+.len                equ $ - e_toobig
 
 ; ---------------------------------------------------------------------------
     section .bss

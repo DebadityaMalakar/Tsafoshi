@@ -7,6 +7,7 @@
     global  read_line
     global  line_is_blank
     global  is_quit
+    global  match_word
     global  line_buf
 
     extern  sys_read_stdin
