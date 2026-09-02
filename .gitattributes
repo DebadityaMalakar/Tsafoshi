@@ -1,0 +1,5 @@
+# run.sh must stay LF or it will not run on Linux; run.bat must stay CRLF.
+* text=auto eol=lf
+*.bat text eol=crlf
+*.asm text eol=lf
+*.inc text eol=lf
