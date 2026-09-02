@@ -91,18 +91,8 @@ line_is_blank:
     xor     eax, eax
     ret
 
+; rdi = the command text, already past the colon
 is_quit:
-    lea     rdi, [line_buf]
-.skip:
-    movzx   eax, byte [rdi]
-    cmp     al, ' '
-    je      .advance
-    cmp     al, 9
-    jne     .try
-.advance:
-    inc     rdi
-    jmp     .skip
-.try:
     lea     rsi, [w_quit]
     call    match_word
     test    rax, rax

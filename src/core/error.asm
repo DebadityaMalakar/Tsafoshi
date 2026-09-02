@@ -11,6 +11,18 @@
     global  err_divzero
     global  err_trailing
     global  err_toobig
+    global  err_unterminated
+    global  err_longname
+    global  err_toomanynames
+    global  err_strspace
+    global  err_badescape
+    global  err_badconv
+    global  err_missingarg
+    global  err_notlvalue
+    global  err_builtin
+    global  err_unknownfn
+    global  err_toomanyargs
+    global  err_needargs
     global  err_codefull
     global  err_deep
     global  err_code
@@ -45,6 +57,54 @@ err_trailing:
 err_toobig:
     lea     rsi, [e_toobig]
     mov     rdx, e_toobig.len
+    jmp     err_set
+err_unterminated:
+    lea     rsi, [e_unterminated]
+    mov     rdx, e_unterminated.len
+    jmp     err_set
+err_longname:
+    lea     rsi, [e_longname]
+    mov     rdx, e_longname.len
+    jmp     err_set
+err_toomanynames:
+    lea     rsi, [e_toomanynames]
+    mov     rdx, e_toomanynames.len
+    jmp     err_set
+err_strspace:
+    lea     rsi, [e_strspace]
+    mov     rdx, e_strspace.len
+    jmp     err_set
+err_badescape:
+    lea     rsi, [e_badescape]
+    mov     rdx, e_badescape.len
+    jmp     err_set
+err_badconv:
+    lea     rsi, [e_badconv]
+    mov     rdx, e_badconv.len
+    jmp     err_set
+err_missingarg:
+    lea     rsi, [e_missingarg]
+    mov     rdx, e_missingarg.len
+    jmp     err_set
+err_notlvalue:
+    lea     rsi, [e_notlvalue]
+    mov     rdx, e_notlvalue.len
+    jmp     err_set
+err_builtin:
+    lea     rsi, [e_builtin]
+    mov     rdx, e_builtin.len
+    jmp     err_set
+err_unknownfn:
+    lea     rsi, [e_unknownfn]
+    mov     rdx, e_unknownfn.len
+    jmp     err_set
+err_toomanyargs:
+    lea     rsi, [e_toomanyargs]
+    mov     rdx, e_toomanyargs.len
+    jmp     err_set
+err_needargs:
+    lea     rsi, [e_needargs]
+    mov     rdx, e_needargs.len
     jmp     err_set
 
 ; These two are raised from inside the compiler and the VM, which are past the
@@ -119,6 +179,42 @@ e_trailing:
 e_toobig:
     db      "expression too complex"
 .len                equ $ - e_toobig
+e_unterminated:
+    db      "unterminated string"
+.len                equ $ - e_unterminated
+e_longname:
+    db      "identifier too long"
+.len                equ $ - e_longname
+e_toomanynames:
+    db      "too many identifiers"
+.len                equ $ - e_toomanynames
+e_strspace:
+    db      "out of string space"
+.len                equ $ - e_strspace
+e_badescape:
+    db      "unknown escape sequence"
+.len                equ $ - e_badescape
+e_badconv:
+    db      "unknown conversion in format string"
+.len                equ $ - e_badconv
+e_missingarg:
+    db      "not enough arguments for format string"
+.len                equ $ - e_missingarg
+e_notlvalue:
+    db      "left of '=' is not a variable"
+.len                equ $ - e_notlvalue
+e_builtin:
+    db      "cannot assign to a builtin"
+.len                equ $ - e_builtin
+e_unknownfn:
+    db      "unknown function"
+.len                equ $ - e_unknownfn
+e_toomanyargs:
+    db      "too many arguments"
+.len                equ $ - e_toomanyargs
+e_needargs:
+    db      "printf needs a format string"
+.len                equ $ - e_needargs
 e_codefull:
     db      "compiled code too large"
 .len                equ $ - e_codefull

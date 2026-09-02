@@ -19,7 +19,6 @@
     global  mode_bump
     global  mode_command
 
-    extern  line_buf
     extern  match_word
     extern  skip_blanks
     extern  sys_write_stdout
@@ -47,12 +46,10 @@ mode_prec:
 .out:
     ret
 
-; Handles "mode" and "mode <name>" the way is_quit handles "quit".
-; -> rax = 1 if the line was a mode command and has been dealt with.
+; rdi = the command text, already past the colon. Handles "mode" and
+; "mode <name>". -> rax = 1 if it was ours and has been dealt with.
 mode_command:
     push    rbx
-    lea     rdi, [line_buf]
-    call    skip_blanks
     lea     rsi, [w_mode]
     call    match_word
     test    rax, rax

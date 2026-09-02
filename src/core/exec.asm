@@ -16,7 +16,6 @@
     extern  vm_run
     extern  disasm_all
     extern  err_code
-    extern  line_buf
     extern  match_word
     extern  skip_blanks
     extern  sys_write_stdout
@@ -42,10 +41,9 @@ exec_run:
     xor     eax, eax
     ret
 
-; Handles "engine", "engine <name>" and "dis". -> rax = 1 if it was ours.
+; rdi = the command text, already past the colon. Handles "engine",
+; "engine <name>" and "dis". -> rax = 1 if it was ours.
 exec_command:
-    lea     rdi, [line_buf]
-    call    skip_blanks
     lea     rsi, [w_engine]
     call    match_word
     test    rax, rax

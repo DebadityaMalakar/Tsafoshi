@@ -4,8 +4,14 @@
 ; bump-allocated arena that the REPL resets once per line, so a tree costs one
 ; pointer bump per node and nothing at all to free.
 ;
-; The parser builds these; eval.asm walks them. Neither knows how the other
-; works, which is the whole point of having the tree in between.
+; The parser builds these; eval.asm and compile.asm walk them. None of them
+; knows how the others work, which is the whole point of having the tree in
+; between.
+;
+; Every node is the same five cells whatever its kind: the three pointer slots
+; are reused rather than added to, so an argument list and a statement chain
+; cost the same per link as a binary operator does. tsafoshi.inc records which
+; slot means what for each kind.
 
 %include "tsafoshi.inc"
 
@@ -13,6 +19,12 @@
     global  ast_num
     global  ast_unary
     global  ast_binary
+    global  ast_var
+    global  ast_assign
+    global  ast_str
+    global  ast_call
+    global  ast_arg
+    global  ast_seq
 
     extern  err_toobig
 
@@ -87,6 +99,99 @@ ast_binary:
     mov     [rax + NODE_VAL], rdi
     mov     [rax + NODE_LHS], rsi
     mov     [rax + NODE_RHS], rdx
+.out:
+    ret
+
+; rdi = name slot, rsi = position -> rax
+ast_var:
+    push    rdi
+    mov     rdi, rsi
+    call    ast_alloc
+    pop     rdi
+    test    rax, rax
+    jz      .out
+    mov     qword [rax + NODE_KIND], NT_VAR
+    mov     [rax + NODE_VAL], rdi
+.out:
+    ret
+
+; rdi = name slot, rsi = the value expression, rdx = position -> rax
+ast_assign:
+    push    rdi
+    push    rsi
+    mov     rdi, rdx
+    call    ast_alloc
+    pop     rsi
+    pop     rdi
+    test    rax, rax
+    jz      .out
+    mov     qword [rax + NODE_KIND], NT_ASSIGN
+    mov     [rax + NODE_VAL], rdi
+    mov     [rax + NODE_LHS], rsi
+.out:
+    ret
+
+; rdi = offset into the string arena, rsi = position -> rax
+ast_str:
+    push    rdi
+    mov     rdi, rsi
+    call    ast_alloc
+    pop     rdi
+    test    rax, rax
+    jz      .out
+    mov     qword [rax + NODE_KIND], NT_STR
+    mov     [rax + NODE_VAL], rdi
+.out:
+    ret
+
+; rdi = builtin id, rsi = argument chain, rdx = count, rcx = position -> rax
+ast_call:
+    push    rdi
+    push    rsi
+    push    rdx
+    sub     rsp, 8
+    mov     rdi, rcx
+    call    ast_alloc
+    add     rsp, 8
+    pop     rdx
+    pop     rsi
+    pop     rdi
+    test    rax, rax
+    jz      .out
+    mov     qword [rax + NODE_KIND], NT_CALL
+    mov     [rax + NODE_VAL], rdi
+    mov     [rax + NODE_LHS], rsi
+    mov     [rax + NODE_RHS], rdx
+.out:
+    ret
+
+; rdi = one argument, rsi = position -> rax. The chain is linked afterwards,
+; through NODE_RHS, by whoever is collecting the list.
+ast_arg:
+    push    rdi
+    mov     rdi, rsi
+    call    ast_alloc
+    pop     rdi
+    test    rax, rax
+    jz      .out
+    mov     qword [rax + NODE_KIND], NT_ARG
+    mov     [rax + NODE_LHS], rdi
+.out:
+    ret
+
+; rdi = this statement, rsi = the rest of the line, rdx = position -> rax
+ast_seq:
+    push    rdi
+    push    rsi
+    mov     rdi, rdx
+    call    ast_alloc
+    pop     rsi
+    pop     rdi
+    test    rax, rax
+    jz      .out
+    mov     qword [rax + NODE_KIND], NT_SEQ
+    mov     [rax + NODE_LHS], rdi
+    mov     [rax + NODE_RHS], rsi
 .out:
     ret
 

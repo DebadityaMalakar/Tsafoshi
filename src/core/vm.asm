@@ -24,6 +24,10 @@
     extern  op_div
     extern  op_mod
     extern  op_neg
+    extern  var_get
+    extern  var_set
+    extern  str_addr
+    extern  printf_run
     extern  err_code
     extern  err_deep
 
@@ -46,12 +50,48 @@ vm_run:
 .op_push:
     mov     rax, [rbx]
     add     rbx, 8
-    lea     rcx, [vm_stack_end]
-    cmp     r12, rcx
-    jae     .overflow
-    mov     [r12], rax
-    add     r12, CELL
+    jmp     .push_grow
+
+; A literal's address, rebuilt from an offset so the stream stays readable.
+.op_str:
+    call    fetch_u32
+    mov     rdi, rax
+    call    str_addr
+    jmp     .push_grow
+
+.op_load:
+    call    fetch_u32
+    mov     rdi, rax
+    call    var_get
+    jmp     .push_grow
+
+; STORE leaves the value where it found it: an assignment is an expression,
+; and POP is what discards the ones nobody wanted.
+.op_store:
+    call    fetch_u32
+    mov     rdi, rax
+    mov     rsi, [r12 - CELL]
+    call    var_set
     jmp     .step
+
+.op_pop:
+    sub     r12, CELL
+    jmp     .step
+
+; The arguments are already contiguous and in order on the operand stack, so
+; the call needs no marshalling at all -- just a pointer into it.  r8 = count
+.op_printf:
+    call    fetch_u32
+    mov     r8, rax
+    call    fetch_pos
+    mov     rdx, rcx
+    mov     rax, r8
+    imul    rax, rax, CELL
+    sub     r12, rax
+    mov     rdi, r12
+    mov     rsi, r8
+    call    printf_run
+    jmp     .push_checked
 
 .op_neg:
     mov     rdi, [r12 - CELL]
@@ -87,6 +127,13 @@ vm_run:
 .push_checked:
     cmp     qword [err_code], 0
     jne     .fail
+
+; Only the instructions that make the stack taller have to test it. A binary
+; operator pops two and pushes one, so it cannot be the one to overflow.
+.push_grow:
+    lea     rcx, [vm_stack_end]
+    cmp     r12, rcx
+    jae     .overflow
 .push_back:
     mov     [r12], rax
     add     r12, CELL
@@ -113,6 +160,12 @@ pop2:
     mov     rsi, [r12 + CELL]
     ret
 
+; -> eax = the next four bytes of operand
+fetch_u32:
+    mov     eax, dword [rbx]
+    add     rbx, 4
+    ret
+
 ; rcx = where in the line this operator came from, for the caret
 fetch_pos:
     mov     ecx, dword [rbx]
@@ -134,6 +187,11 @@ vm_table:
     dq      vm_run.op_div               ; OP_DIV
     dq      vm_run.op_mod               ; OP_MOD
     dq      vm_run.op_neg               ; OP_NEG
+    dq      vm_run.op_pop               ; OP_POP
+    dq      vm_run.op_load              ; OP_LOAD
+    dq      vm_run.op_store             ; OP_STORE
+    dq      vm_run.op_str               ; OP_STR
+    dq      vm_run.op_printf            ; OP_PRINTF
 
 ; ---------------------------------------------------------------------------
     section .bss
