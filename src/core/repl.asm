@@ -10,13 +10,14 @@
     extern  line_is_blank
     extern  is_quit
     extern  mode_command
+    extern  exec_command
     extern  line_buf
     extern  lex_init
     extern  tok_kind
     extern  tok_pos
     extern  ast_reset
     extern  parse_expression
-    extern  ast_eval
+    extern  exec_run
     extern  print_result
     extern  err_code
     extern  err_reset
@@ -49,6 +50,9 @@ repl_main:
     call    mode_command
     test    rax, rax
     jnz     .loop
+    call    exec_command
+    test    rax, rax
+    jnz     .loop
 
     call    err_reset
     call    ast_reset
@@ -61,8 +65,8 @@ repl_main:
     cmp     qword [tok_kind], TK_EOF    ; the whole line must be consumed
     jne     .trailing
 
-    mov     rdi, rax                    ; parse built a tree; now walk it
-    call    ast_eval
+    mov     rdi, rax                    ; parse built a tree; now run it
+    call    exec_run
     cmp     qword [err_code], 0
     jne     .error
 
@@ -88,9 +92,9 @@ repl_main:
     section .data
 
 msg_banner:
-    db      "Tsafoshi 0.2 -- stage 1: precedence climbing over a syntax tree", 10
-    db      "* / % bind tighter than + -, and parentheses override both", 10
-    db      "type an expression, 'mode' to change that, or 'quit' to leave", 10, 10
+    db      "Tsafoshi 0.3 -- stage 1.5: compiled to bytecode, run on a VM", 10
+    db      "BODMAS by default; 'mode' changes the order, 'dis' shows the code", 10
+    db      "type an expression, or 'quit' to leave", 10, 10
 .len                equ $ - msg_banner
 msg_prompt:
     db      "tsafoshi> "

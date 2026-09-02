@@ -6,7 +6,8 @@ A **C99** interpreter written in x86-64 assembly. No compiler backend, no code
 generation, no ABI to fight — C source goes in, behaviour comes out. The host
 is hand-written assembly the whole way down.
 
-This is stage 1. Right now it is a calculator that parses to a syntax tree.
+This is stage 1.5. Right now it is a calculator that compiles to bytecode
+and runs it on a virtual machine.
 
 ```
 tsafoshi> 2 + 3 * 4
@@ -67,8 +68,8 @@ assistance, not as reviewed, production-grade work.
 |---|---|---|
 | **0** | Tokenizer, recursive-descent parser, left-to-right evaluation, 64-bit signed ints | **done** |
 | **1** | Precedence climbing, an AST, switchable evaluation order | **done** |
-| 1.5 | Bytecode: compile the tree, then run it in a dispatch loop | next |
-| 2 | Variables, assignment, `if` / `while`, the VM call stack | |
+| **1.5** | Bytecode: compile the tree, then run it in a dispatch loop, plus a disassembler | **done** |
+| 2 | Variables, assignment, `if` / `while`, the VM call stack | next |
 | 3 | Functions, pointers, arrays, `struct` | |
 | 4 | Native call bridge — `printf` starts working | |
 | 5 | Preprocessor: `#include`, `#define`, `#if`, `__VA_ARGS__` | |
@@ -206,8 +207,66 @@ tsafoshi> quit
 ```
 
 Operators: `+ - * / %`, unary `-` and `+`, and parentheses. Values are 64-bit
-signed and wrap silently on overflow. `mode` reports or changes the evaluation
-order; `quit`, `exit`, `q` or EOF (Ctrl+D / Ctrl+Z) ends the session.
+signed and wrap silently on overflow.
+
+| Command | Effect |
+|---|---|
+| `mode`, `mode <name>` | report or change the evaluation order |
+| `engine`, `engine tree`, `engine bytecode` | which engine runs the expression |
+| `dis` | toggle the bytecode listing |
+| `quit`, `exit`, `q`, EOF | leave |
+
+These are matched before the expression parser sees the line, so `mode`,
+`engine` and `dis` are effectively reserved words. That is fine while the
+language has no identifiers and will not be once stage 2 adds variables — the
+plan is to move every command behind a `:` prefix at that point, in one go.
+
+## Bytecode
+
+The parser builds a tree, `compile.asm` flattens it to bytecode, and `vm.asm`
+runs that in a dispatch loop. `dis` shows the middle step:
+
+```
+tsafoshi> dis
+disassembly: on
+tsafoshi> 2 + 3 * 4
+    0000  push 2
+    0009  push 3
+    0018  push 4
+    0027  mul
+    0028  add
+    0029  halt
+= 14
+```
+
+A stack machine over 64-bit cells, one byte of opcode, and an operand only
+where one is needed:
+
+| Opcode | Operand | Effect |
+|---|---|---|
+| `halt` | | stop; the answer is on top of the stack |
+| `push` | 8-byte immediate | push it |
+| `add` `sub` `mul` `div` `mod` | `div` and `mod` take a 4-byte column | pop two, push the result |
+| `neg` | | negate the top |
+
+The binary opcodes are numbered in token order, so an operator token becomes
+its opcode with a subtract and an add rather than a table lookup.
+
+`div` and `mod` are the only operations that can fail, and by the time the VM
+is running there is no tree left to ask where they came from — so those two
+carry the column they were written at, and a division by zero still gets its
+caret in the right place. Nothing else pays for that.
+
+### Two engines, on purpose
+
+The tree walker from stage 1 is still there, and `engine tree` switches back to
+it. It is not a fallback. It is an oracle: two independent implementations of
+the same semantics, which must agree on every input, so a bug in either one
+shows up as a disagreement rather than as a wrong answer nobody notices.
+
+Both call the same routines in `op.asm`, so they cannot disagree about what
+`%` means — only about order, operand plumbing, and the encoding. Those are
+exactly the things a new execution layer gets wrong.
 
 ## Order of operations
 
@@ -266,7 +325,12 @@ src/
     lexer.asm           source text -> tokens
     parser.asm          tokens -> a syntax tree (structure only)
     ast.asm             node storage: one arena, reset per line
-    eval.asm            tree -> value (order only)
+    eval.asm            tree -> value directly (the oracle engine)
+    compile.asm         tree -> bytecode
+    code.asm            the code buffer, reset per line
+    vm.asm              the dispatch loop and its operand stack
+    disasm.asm          bytecode -> a listing
+    exec.asm            which engine runs, and the commands that switch it
     op.asm              operator semantics (values)
     mode.asm            evaluation order, and the "mode" command
     error.asm           diagnostics and the caret
@@ -295,19 +359,20 @@ The build is `src/main.asm` plus `src/core/*.asm` plus exactly one
 | lexer → parser | `lex_init`, `lex_next`, and one token of lookahead in `tok_kind` / `tok_val` / `tok_pos` |
 | parser → ast | `ast_num` / `ast_unary` / `ast_binary`, each returning a node or zero |
 | parser → mode | `mode_prec(kind)` and `mode_bump` — the parser never hardcodes an order |
-| eval → op | `op_apply(lhs, rhs, kind, pos)` — `eval.asm` decides order, `op.asm` produces every value |
+| tree → engine | `exec_run(root)`, which is either `ast_eval` or `code_compile` then `vm_run` |
+| engine → op | `op_apply(lhs, rhs, kind, pos)` and the `op_*` routines — the engine decides order, `op.asm` produces every value |
+| compiler → vm | the code buffer in `code.asm`; neither module owns the memory, so `disasm.asm` reads it without either knowing |
 | anything → error | `err_expected` / `err_unclosed` / `err_divzero` / `err_trailing` / `err_toobig`, each taking a position |
 | core → platform | the four `sys_*` routines below |
 
 The tree is the seam that matters. The parser builds nodes and never computes
-a value; `eval.asm` walks nodes and never looks at a token. Neither knows how
-the other works, which is what makes the next stage a local change — a
-bytecode compiler is a second consumer of the same tree, sitting exactly where
-`ast_eval` sits now.
+a value; a consumer walks nodes and never looks at a token. That is what made
+the bytecode compiler a purely additive change — it is a second consumer of
+the same tree, and not one line of the lexer or the parser moved to get it.
 
-Both `op_apply` and `ast_eval` dispatch through a jump table, indexed by token
-kind and by node kind respectively. That is deliberately the same shape the
-bytecode VM's inner loop will want.
+`op_apply`, `ast_eval`, `emit_node` and the VM's inner loop all dispatch
+through jump tables, indexed by token kind, node kind, node kind and opcode
+respectively.
 
 Nodes come out of a bump-allocated arena that the REPL resets once per line,
 so a tree costs one pointer bump per node and nothing at all to free. Running
@@ -405,6 +470,15 @@ encoding those as control flow means a dozen nested rules to write and
 re-read. Once the table exists, an alternate convention costs one more row.
 Having three of them keeps the parser honest: no rule may assume a fixed
 order, because the order is not known until run time.
+
+**Why bytecode at all, this early.** A tree walker would carry the language a
+long way, but every future feature is easier against a linear instruction
+stream: jumps for `if` and `while` are branches to an offset rather than
+another node type, a call stack has somewhere to live, and the interpreter's
+hot loop stops being recursive descent over pointers. Retrofitting that after
+control flow exists means rewriting control flow. Doing it while the language
+is five operators means the whole change is three new files and no edits to
+the front end.
 
 **Assembler.** NASM. `%include`, `default rel` and the section syntax are
 NASM-isms; FASM will build this with some edits.

@@ -67,4 +67,24 @@ NODE_SIZE           equ CELL * 5
 
 AST_CAP             equ 4096            ; nodes per line, then "too complex"
 
+; Bytecode. One byte of opcode, then whatever operand that opcode carries:
+; PUSH an 8-byte immediate, DIV and MOD a 4-byte offset into the line so a
+; division by zero can still put the caret in the right column.
+;
+; The binary opcodes are laid out in token order, so the compiler turns an
+; operator token into its opcode with one subtract and one add rather than a
+; table lookup.
+OP_HALT             equ 0
+OP_PUSH             equ 1
+OP_ADD              equ 2
+OP_SUB              equ 3
+OP_MUL              equ 4
+OP_DIV              equ 5
+OP_MOD              equ 6
+OP_NEG              equ 7
+OP_COUNT            equ 8
+
+CODE_CAP            equ 65536           ; bytes of bytecode per line
+VM_STACK_CAP        equ 1024            ; cells on the operand stack
+
 %endif

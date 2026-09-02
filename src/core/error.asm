@@ -11,6 +11,8 @@
     global  err_divzero
     global  err_trailing
     global  err_toobig
+    global  err_codefull
+    global  err_deep
     global  err_code
 
     extern  line_buf
@@ -43,6 +45,19 @@ err_trailing:
 err_toobig:
     lea     rsi, [e_toobig]
     mov     rdx, e_toobig.len
+    jmp     err_set
+
+; These two are raised from inside the compiler and the VM, which are past the
+; point of knowing which column is to blame, so they point at the line itself.
+err_codefull:
+    lea     rsi, [e_codefull]
+    mov     rdx, e_codefull.len
+    lea     rdi, [line_buf]
+    jmp     err_set
+err_deep:
+    lea     rsi, [e_deep]
+    mov     rdx, e_deep.len
+    lea     rdi, [line_buf]
     ; fall through
 
 ; rsi = message, rdx = length, rdi = position. The first error on a line wins;
@@ -104,6 +119,12 @@ e_trailing:
 e_toobig:
     db      "expression too complex"
 .len                equ $ - e_toobig
+e_codefull:
+    db      "compiled code too large"
+.len                equ $ - e_codefull
+e_deep:
+    db      "expression nests too deeply"
+.len                equ $ - e_deep
 
 ; ---------------------------------------------------------------------------
     section .bss

@@ -21,6 +21,7 @@
 
     extern  line_buf
     extern  match_word
+    extern  skip_blanks
     extern  sys_write_stdout
     extern  sys_write_stderr
 
@@ -117,19 +118,6 @@ print_current:
     lea     rsi, [msg_newline]
     mov     rdx, 1
     jmp     sys_write_stdout
-
-; rdi = text -> rdi past any spaces and tabs
-skip_blanks:
-    movzx   eax, byte [rdi]
-    cmp     al, ' '
-    je      .step
-    cmp     al, 9
-    jne     .done
-.step:
-    inc     rdi
-    jmp     skip_blanks
-.done:
-    ret
 
 ; ---------------------------------------------------------------------------
     section .data

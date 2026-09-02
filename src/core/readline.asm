@@ -8,6 +8,7 @@
     global  line_is_blank
     global  is_quit
     global  match_word
+    global  skip_blanks
     global  line_buf
 
     extern  sys_read_stdin
@@ -115,6 +116,19 @@ is_quit:
     ret
 .yes:
     mov     eax, 1
+    ret
+
+; rdi = text -> rdi past any spaces and tabs
+skip_blanks:
+    movzx   eax, byte [rdi]
+    cmp     al, ' '
+    je      .step
+    cmp     al, 9
+    jne     .done
+.step:
+    inc     rdi
+    jmp     skip_blanks
+.done:
     ret
 
 ; rdi = line, rsi = NUL-terminated word. Must be followed by space or EOL.
