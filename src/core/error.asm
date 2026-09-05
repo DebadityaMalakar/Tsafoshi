@@ -12,6 +12,7 @@
     global  err_trailing
     global  err_toobig
     global  err_unterminated
+    global  err_unterminatedcomment
     global  err_longname
     global  err_toomanynames
     global  err_strspace
@@ -23,11 +24,24 @@
     global  err_unknownfn
     global  err_toomanyargs
     global  err_needargs
+    global  err_expectedsemi
+    global  err_expectedparen
+    global  err_expectedname
+    global  err_expectedwhile
+    global  err_undeclared
+    global  err_redeclared
+    global  err_declbody
+    global  err_notinloop
+    global  err_toomanyvars
+    global  err_toomanyscopes
+    global  err_toodeep
+    global  err_srcfull
     global  err_codefull
     global  err_deep
     global  err_code
 
-    extern  line_buf
+    extern  src_buf
+    extern  src_line_start
     extern  write_spaces
     extern  sys_write_stderr
 
@@ -61,6 +75,10 @@ err_toobig:
 err_unterminated:
     lea     rsi, [e_unterminated]
     mov     rdx, e_unterminated.len
+    jmp     err_set
+err_unterminatedcomment:
+    lea     rsi, [e_unterminatedcomment]
+    mov     rdx, e_unterminatedcomment.len
     jmp     err_set
 err_longname:
     lea     rsi, [e_longname]
@@ -106,18 +124,67 @@ err_needargs:
     lea     rsi, [e_needargs]
     mov     rdx, e_needargs.len
     jmp     err_set
+err_expectedsemi:
+    lea     rsi, [e_expectedsemi]
+    mov     rdx, e_expectedsemi.len
+    jmp     err_set
+err_expectedparen:
+    lea     rsi, [e_expectedparen]
+    mov     rdx, e_expectedparen.len
+    jmp     err_set
+err_expectedname:
+    lea     rsi, [e_expectedname]
+    mov     rdx, e_expectedname.len
+    jmp     err_set
+err_expectedwhile:
+    lea     rsi, [e_expectedwhile]
+    mov     rdx, e_expectedwhile.len
+    jmp     err_set
+err_undeclared:
+    lea     rsi, [e_undeclared]
+    mov     rdx, e_undeclared.len
+    jmp     err_set
+err_redeclared:
+    lea     rsi, [e_redeclared]
+    mov     rdx, e_redeclared.len
+    jmp     err_set
+err_declbody:
+    lea     rsi, [e_declbody]
+    mov     rdx, e_declbody.len
+    jmp     err_set
+err_notinloop:
+    lea     rsi, [e_notinloop]
+    mov     rdx, e_notinloop.len
+    jmp     err_set
+err_toomanyvars:
+    lea     rsi, [e_toomanyvars]
+    mov     rdx, e_toomanyvars.len
+    jmp     err_set
+err_toomanyscopes:
+    lea     rsi, [e_toomanyscopes]
+    mov     rdx, e_toomanyscopes.len
+    jmp     err_set
+err_toodeep:
+    lea     rsi, [e_toodeep]
+    mov     rdx, e_toodeep.len
+    jmp     err_set
+err_srcfull:
+    lea     rsi, [e_srcfull]
+    mov     rdx, e_srcfull.len
+    jmp     err_set
 
 ; These two are raised from inside the compiler and the VM, which are past the
-; point of knowing which column is to blame, so they point at the line itself.
+; point of knowing which column is to blame, so they point at the source
+; itself.
 err_codefull:
     lea     rsi, [e_codefull]
     mov     rdx, e_codefull.len
-    lea     rdi, [line_buf]
+    lea     rdi, [src_buf]
     jmp     err_set
 err_deep:
     lea     rsi, [e_deep]
     mov     rdx, e_deep.len
-    lea     rdi, [line_buf]
+    lea     rdi, [src_buf]
     ; fall through
 
 ; rsi = message, rdx = length, rdi = position. The first error on a line wins;
@@ -133,8 +200,14 @@ err_set:
     ret
 
 ; Caret under the offending column, then the message.
+;
+; The column is measured from the start of the line the position is on, not
+; from the start of the submission -- a block takes several lines, and the
+; caret has to land under the one the terminal is still showing. Both prompts
+; are PROMPT_LEN wide precisely so that this arithmetic works on either.
 err_report:
-    lea     rax, [line_buf]
+    mov     rdi, [err_pos]
+    call    src_line_start
     mov     rdi, [err_pos]
     sub     rdi, rax
     add     rdi, PROMPT_LEN
@@ -165,7 +238,7 @@ msg_newline:
     db      10
 
 e_expected:
-    db      "expected a number or '('"
+    db      "expected an expression"
 .len                equ $ - e_expected
 e_unclosed:
     db      "expected ')'"
@@ -182,6 +255,9 @@ e_toobig:
 e_unterminated:
     db      "unterminated string"
 .len                equ $ - e_unterminated
+e_unterminatedcomment:
+    db      "unterminated comment"
+.len                equ $ - e_unterminatedcomment
 e_longname:
     db      "identifier too long"
 .len                equ $ - e_longname
@@ -204,7 +280,7 @@ e_notlvalue:
     db      "left of '=' is not a variable"
 .len                equ $ - e_notlvalue
 e_builtin:
-    db      "cannot assign to a builtin"
+    db      "a builtin function is not a variable"
 .len                equ $ - e_builtin
 e_unknownfn:
     db      "unknown function"
@@ -215,6 +291,42 @@ e_toomanyargs:
 e_needargs:
     db      "printf needs a format string"
 .len                equ $ - e_needargs
+e_expectedsemi:
+    db      "expected ';'"
+.len                equ $ - e_expectedsemi
+e_expectedparen:
+    db      "expected '('"
+.len                equ $ - e_expectedparen
+e_expectedname:
+    db      "expected a variable name"
+.len                equ $ - e_expectedname
+e_expectedwhile:
+    db      "expected 'while' after the body of 'do'"
+.len                equ $ - e_expectedwhile
+e_undeclared:
+    db      "undeclared identifier"
+.len                equ $ - e_undeclared
+e_redeclared:
+    db      "already declared in this scope"
+.len                equ $ - e_redeclared
+e_declbody:
+    db      "a declaration needs a block of its own"
+.len                equ $ - e_declbody
+e_notinloop:
+    db      "not inside a loop"
+.len                equ $ - e_notinloop
+e_toomanyvars:
+    db      "too many variables"
+.len                equ $ - e_toomanyvars
+e_toomanyscopes:
+    db      "blocks nest too deeply"
+.len                equ $ - e_toomanyscopes
+e_toodeep:
+    db      "loops nest too deeply"
+.len                equ $ - e_toodeep
+e_srcfull:
+    db      "input too long"
+.len                equ $ - e_srcfull
 e_codefull:
     db      "compiled code too large"
 .len                equ $ - e_codefull

@@ -7,13 +7,20 @@
 ;
 ; This is the oracle engine: it and vm.asm must agree on every input, which is
 ; the only reason it is still here now that there is a compiler.
+;
+; Control flow is where the two engines stop resembling each other, and that is
+; exactly why keeping both is worth the trouble. The VM jumps: "break" is an
+; address. A recursive walker cannot jump out of its own call chain, so it sets
+; eval_flow instead and every statement rule tests it on the way back out --
+; a different mechanism entirely, which must still produce the same answer.
 
 %include "tsafoshi.inc"
 
+    global  eval_program
     global  ast_eval
 
     extern  op_apply
-    extern  op_neg
+    extern  op_unary
     extern  var_get
     extern  var_set
     extern  str_addr
@@ -21,6 +28,27 @@
     extern  err_code
 
     section .text
+
+; rdi = the statement list, rsi = the trailing expression or zero -> rax.
+; Statements are run for effect; the line's value is that last expression, or
+; zero when there was not one.
+eval_program:
+    push    rbx
+    mov     rbx, rsi
+    mov     qword [eval_flow], FLOW_NORMAL
+    call    ast_eval
+    cmp     qword [err_code], 0
+    jne     .zero
+    test    rbx, rbx
+    jz      .zero
+    mov     rdi, rbx
+    call    ast_eval
+    pop     rbx
+    ret
+.zero:
+    xor     eax, eax
+    pop     rbx
+    ret
 
 ; rdi = node -> rax.  rbx = the node under evaluation, r12 = its left value
 ast_eval:
@@ -43,10 +71,14 @@ ast_eval:
     jmp     var_get
 
 .unary:
-    mov     rdi, [rdi + NODE_LHS]
+    push    rbx
+    mov     rbx, rdi
+    mov     rdi, [rbx + NODE_LHS]
     call    ast_eval
+    mov     rsi, [rbx + NODE_VAL]
     mov     rdi, rax
-    jmp     op_neg                      ; TK_MINUS is the only one so far
+    pop     rbx
+    jmp     op_unary
 
 .binary:
     push    rbx
@@ -72,6 +104,39 @@ ast_eval:
     xor     eax, eax
     jmp     .out
 
+; "&&" and "||" evaluate their right operand only when the left one has not
+; already settled the question, and yield the 1 or 0 that C says they do.
+.logical:
+    push    rbx
+    mov     rbx, rdi
+    mov     rdi, [rbx + NODE_LHS]
+    call    ast_eval
+    cmp     qword [err_code], 0
+    jne     .logical_false
+    cmp     qword [rbx + NODE_VAL], TK_ANDAND
+    je      .logical_and
+    test    rax, rax                    ; "||": a true left settles it
+    jnz     .logical_true
+    jmp     .logical_rhs
+.logical_and:
+    test    rax, rax                    ; "&&": a false left settles it
+    jz      .logical_false
+.logical_rhs:
+    mov     rdi, [rbx + NODE_RHS]
+    call    ast_eval
+    cmp     qword [err_code], 0
+    jne     .logical_false
+    test    rax, rax
+    jz      .logical_false
+.logical_true:
+    mov     eax, 1
+    pop     rbx
+    ret
+.logical_false:
+    xor     eax, eax
+    pop     rbx
+    ret
+
 ; An assignment is an expression, so the value stays: x = y = 3 works, and so
 ; does echoing what the prompt was just handed.
 .assign:
@@ -93,22 +158,153 @@ ast_eval:
     pop     rbx
     ret
 
-; Statements in sequence: everything but the last value is discarded, which is
-; what the VM's POP does with the same tree.
+; --- statements. Each leaves no value and each stops early if the walk is
+; --- unwinding, whether towards an error or out of a loop.
+
+; Statements in sequence, which is also what the VM does with the same tree --
+; except that the VM reaches the end of the list by running off it, and this
+; has to be told to stop.
 .seq:
     push    rbx
     mov     rbx, rdi
     mov     rdi, [rbx + NODE_LHS]
     call    ast_eval
     cmp     qword [err_code], 0
-    jne     .seq_failed
+    jne     .stmt_out
+    cmp     qword [eval_flow], FLOW_NORMAL
+    jne     .stmt_out
     mov     rdi, [rbx + NODE_RHS]
     call    ast_eval
-    pop     rbx
-    ret
-.seq_failed:
+.stmt_out:
     xor     eax, eax
     pop     rbx
+    ret
+
+; An expression run for its effect. The value is computed and dropped, which
+; is the one thing that separates "printf(...)" from "printf(...);".
+.expr:
+    mov     rdi, [rdi + NODE_LHS]
+    call    ast_eval
+    xor     eax, eax
+    ret
+
+; A declaration with no initialiser still writes: the slot may have been used
+; by a block that has since closed, and C99's "indeterminate" is not something
+; worth reproducing when zero is free.
+.decl:
+    push    rbx
+    mov     rbx, rdi
+    xor     eax, eax
+    mov     rdi, [rbx + NODE_LHS]
+    test    rdi, rdi
+    jz      .decl_store
+    call    ast_eval
+    cmp     qword [err_code], 0
+    jne     .stmt_out
+.decl_store:
+    mov     rsi, rax
+    mov     rdi, [rbx + NODE_VAL]
+    call    var_set
+    xor     eax, eax
+    pop     rbx
+    ret
+
+.if:
+    push    rbx
+    mov     rbx, rdi
+    mov     rdi, [rbx + NODE_LHS]
+    call    ast_eval
+    cmp     qword [err_code], 0
+    jne     .stmt_out
+    test    rax, rax
+    jnz     .if_then
+    mov     rdi, [rbx + NODE_VAL]       ; the else branch, or nothing
+    jmp     .if_run
+.if_then:
+    mov     rdi, [rbx + NODE_RHS]
+.if_run:
+    call    ast_eval
+    jmp     .stmt_out
+
+; while, do and for are one loop with the tests moved. r12 tells the shared
+; body from the three entries which of them is running.
+.while:
+    push    rbx
+    push    r12
+    mov     rbx, rdi
+    mov     r12, NT_WHILE
+    jmp     .loop_test
+.do:
+    push    rbx
+    push    r12
+    mov     rbx, rdi
+    mov     r12, NT_DO
+    jmp     .loop_body
+.for:
+    push    rbx
+    push    r12
+    mov     rbx, rdi
+    mov     r12, NT_FOR
+
+; An absent condition -- "for (;;)" -- is true, which is why the node stores
+; zero for it rather than a literal one.
+.loop_test:
+    mov     rdi, [rbx + NODE_LHS]
+    test    rdi, rdi
+    jz      .loop_body
+    call    ast_eval
+    cmp     qword [err_code], 0
+    jne     .loop_out
+    test    rax, rax
+    jz      .loop_done
+
+.loop_body:
+    mov     rdi, [rbx + NODE_RHS]
+    call    ast_eval
+    cmp     qword [err_code], 0
+    jne     .loop_out
+    mov     rax, [eval_flow]
+    cmp     rax, FLOW_BREAK
+    je      .loop_broken
+    mov     qword [eval_flow], FLOW_NORMAL
+
+; The step runs on the way round, including after a "continue" -- which is the
+; whole reason for is not just a while with the step written at the bottom.
+    mov     rdi, [rbx + NODE_VAL]
+    test    rdi, rdi
+    jz      .loop_tail
+    cmp     r12, NT_FOR
+    jne     .loop_tail
+    call    ast_eval
+    cmp     qword [err_code], 0
+    jne     .loop_out
+
+.loop_tail:
+    cmp     r12, NT_DO
+    jne     .loop_test
+    mov     rdi, [rbx + NODE_LHS]       ; do-while tests at the bottom
+    call    ast_eval
+    cmp     qword [err_code], 0
+    jne     .loop_out
+    test    rax, rax
+    jnz     .loop_body
+
+.loop_done:
+.loop_broken:
+    mov     qword [eval_flow], FLOW_NORMAL
+.loop_out:
+    xor     eax, eax
+    pop     r12
+    pop     rbx
+    ret
+
+.break:
+    mov     qword [eval_flow], FLOW_BREAK
+    xor     eax, eax
+    ret
+.continue:
+    mov     qword [eval_flow], FLOW_CONTINUE
+    xor     eax, eax
     ret
 
 ; Arguments are gathered into a contiguous block before the call, because that
@@ -166,4 +362,21 @@ node_table:
     dq      ast_eval.str                ; NT_STR
     dq      ast_eval.call               ; NT_CALL
     dq      ast_eval.zero               ; NT_ARG, only ever walked by NT_CALL
+    dq      ast_eval.logical            ; NT_LOGICAL
     dq      ast_eval.seq                ; NT_SEQ
+    dq      ast_eval.expr               ; NT_EXPR
+    dq      ast_eval.decl               ; NT_DECL
+    dq      ast_eval.if                 ; NT_IF
+    dq      ast_eval.while              ; NT_WHILE
+    dq      ast_eval.do                 ; NT_DO
+    dq      ast_eval.for                ; NT_FOR
+    dq      ast_eval.break              ; NT_BREAK
+    dq      ast_eval.continue           ; NT_CONTINUE
+    dq      ast_eval.zero               ; NT_EMPTY
+
+; ---------------------------------------------------------------------------
+    section .bss
+
+    alignb  8
+eval_flow:
+    resq    1

@@ -1,11 +1,15 @@
 ; SPDX-License-Identifier: MIT
 ;
-; Variable storage: one cell per name slot, and the ":vars" listing.
+; Variable storage: one cell per storage slot, and the ":vars" listing.
 ;
-; Slots come from names.asm and this file never looks at the text behind one,
-; which is the seam that matters: the compiler resolves a name once, at compile
-; time, and the VM only ever indexes. Everything starts at zero because .bss
-; does, so reading a variable before assigning it yields 0 rather than garbage.
+; Slots come from scope.asm and this file never looks at the name behind one,
+; which is the seam that matters: the parser resolves an identifier once, and
+; every engine after it only ever indexes. Everything starts at zero because
+; .bss does, so a slot handed back out by a closed block reads as zero rather
+; than as whatever the last block left in it.
+;
+; The listing is the one place a name is wanted again, and it asks scope.asm
+; rather than keeping a second copy of the answer.
 
 %include "tsafoshi.inc"
 
@@ -15,7 +19,9 @@
 
     extern  match_word
     extern  name_text
-    extern  name_count
+    extern  scope_global_count
+    extern  scope_global_name
+    extern  scope_global_slot
     extern  fmt_i64
     extern  sys_write_stdout
 
@@ -41,16 +47,20 @@ vars_command:
     jz      .not_ours
 
     push    rbx
-    mov     ebx, BI_COUNT               ; the builtins are not variables
-    cmp     rbx, [name_count]
-    jae     .empty
+    xor     ebx, ebx
+    call    scope_global_count
+    test    rax, rax
+    jz      .empty
 .next:
-    cmp     rbx, [name_count]
+    call    scope_global_count
+    cmp     rbx, rax
     jae     .done
     lea     rsi, [t_indent]
     mov     rdx, t_indent.len
     call    sys_write_stdout
     mov     rdi, rbx
+    call    scope_global_name
+    mov     rdi, rax
     call    name_text
     mov     rsi, rax
     call    sys_write_stdout
@@ -58,6 +68,8 @@ vars_command:
     mov     rdx, t_equals.len
     call    sys_write_stdout
     mov     rdi, rbx
+    call    scope_global_slot
+    mov     rdi, rax
     call    var_get
     call    fmt_i64
     call    sys_write_stdout
@@ -100,4 +112,4 @@ m_none:
 
     alignb  8
 var_val:
-    resq    NAME_CAP
+    resq    VAR_CAP

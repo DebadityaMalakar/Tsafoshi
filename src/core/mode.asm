@@ -132,15 +132,30 @@ n_rtl:
     db      "rtl", 0
 .len                equ $ - n_rtl - 1
 
-; One row per mode, indexed by token kind minus TK_OP_FIRST.
+; One row per mode, indexed by token kind minus TK_OP_FIRST. The rows are the
+; whole of what a mode is: the tokens arrived in C99 precedence order, so the
+; bodmas row is that order read straight down.
 r_bodmas:
-    db      PREC_ADDITIVE               ; TK_PLUS
-    db      PREC_ADDITIVE               ; TK_MINUS
     db      PREC_MULTIPLICATIVE         ; TK_STAR
     db      PREC_MULTIPLICATIVE         ; TK_SLASH
     db      PREC_MULTIPLICATIVE         ; TK_PERCENT
+    db      PREC_ADDITIVE               ; TK_PLUS
+    db      PREC_ADDITIVE               ; TK_MINUS
+    db      PREC_SHIFT                  ; TK_SHL
+    db      PREC_SHIFT                  ; TK_SHR
+    db      PREC_RELATIONAL             ; TK_LT
+    db      PREC_RELATIONAL             ; TK_GT
+    db      PREC_RELATIONAL             ; TK_LE
+    db      PREC_RELATIONAL             ; TK_GE
+    db      PREC_EQUALITY               ; TK_EQ
+    db      PREC_EQUALITY               ; TK_NE
+    db      PREC_BITAND                 ; TK_AMP
+    db      PREC_BITXOR                 ; TK_CARET
+    db      PREC_BITOR                  ; TK_PIPE
+    db      PREC_LOGAND                 ; TK_ANDAND
+    db      PREC_LOGOR                  ; TK_OROR
 r_flat:
-    times   5 db PREC_LOWEST
+    times   TK_OP_LAST - TK_OP_FIRST + 1 db PREC_LOWEST
 
     align   8
 mode_table:
@@ -161,7 +176,7 @@ msg_mode:
     db      "mode: "
 .len                equ $ - msg_mode
 msg_list:
-    db      "  bodmas  brackets, then * / %, then + -", 10
+    db      "  bodmas  the C99 ladder: * / % before + - before the rest", 10
     db      "  ltr     one flat level, folded left to right", 10
     db      "  rtl     one flat level, folded right to left", 10
 .len                equ $ - msg_list

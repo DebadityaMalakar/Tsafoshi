@@ -7,9 +7,15 @@
 ; The VM decides when an operation happens and where its operands live; it has
 ; no opinion about what any operator means.
 ;
-; The operand stack is never checked for underflow. compile.asm only ever
-; emits well-formed postfix, so an operator always has its operands; a check
-; here would be testing the compiler from inside the hot loop.
+; The sixteen binary opcodes share one handler. They were laid out contiguously
+; and in token order for the compiler's sake, and that same ordering pays here:
+; the opcode is still in eax when the handler is entered, so it indexes a table
+; of op.asm routines directly and the loop needs one arm rather than sixteen.
+;
+; The operand stack is never checked for underflow. compile.asm only ever emits
+; well-formed postfix -- an expression leaves one cell, a statement leaves none
+; -- so an operator always has its operands; a check here would be testing the
+; compiler from inside the hot loop.
 
 %include "tsafoshi.inc"
 
@@ -17,13 +23,26 @@
 
     extern  code_buf
     extern  code_len
-    extern  line_buf
-    extern  op_add
-    extern  op_sub
+    extern  src_buf
     extern  op_mul
     extern  op_div
     extern  op_mod
+    extern  op_add
+    extern  op_sub
+    extern  op_shl
+    extern  op_shr
+    extern  op_lt
+    extern  op_gt
+    extern  op_le
+    extern  op_ge
+    extern  op_eq
+    extern  op_ne
+    extern  op_and
+    extern  op_xor
+    extern  op_or
     extern  op_neg
+    extern  op_not
+    extern  op_bnot
     extern  var_get
     extern  var_set
     extern  str_addr
@@ -93,36 +112,44 @@ vm_run:
     call    printf_run
     jmp     .push_checked
 
+; The three unary operators rewrite the top of the stack in place, so none of
+; them can change its height and none of them needs checking.
 .op_neg:
     mov     rdi, [r12 - CELL]
     call    op_neg
     mov     [r12 - CELL], rax
     jmp     .step
+.op_not:
+    mov     rdi, [r12 - CELL]
+    call    op_not
+    mov     [r12 - CELL], rax
+    jmp     .step
+.op_bnot:
+    mov     rdi, [r12 - CELL]
+    call    op_bnot
+    mov     [r12 - CELL], rax
+    jmp     .step
 
-; The five binary handlers differ only in which routine they call, and the two
-; that can fail also pick a source column out of the stream first.
-.op_add:
-    call    pop2
-    call    op_add
-    jmp     .push_back
-.op_sub:
-    call    pop2
-    call    op_sub
-    jmp     .push_back
-.op_mul:
-    call    pop2
-    call    op_mul
-    jmp     .push_back
+; Division is the only arithmetic that can fail, so it is the only arithmetic
+; that pays for a source column. rcx carries it into op.asm, and stays zero for
+; every other operator because nothing there will ever read it.
 .op_div:
-    call    fetch_pos
-    call    pop2
-    call    op_div
-    jmp     .push_checked
 .op_mod:
+    push    rax
     call    fetch_pos
-    call    pop2
-    call    op_mod
-    jmp     .push_checked
+    pop     rax
+    jmp     .binary_go
+.op_binary:
+    xor     ecx, ecx
+.binary_go:
+    lea     r9, [op_routines]
+    sub     eax, OP_BIN_FIRST
+    mov     r9, [r9 + rax * 8]
+    sub     r12, CELL * 2
+    mov     rdi, [r12]
+    mov     rsi, [r12 + CELL]
+    call    r9
+    ; fall through
 
 .push_checked:
     cmp     qword [err_code], 0
@@ -139,6 +166,29 @@ vm_run:
     add     r12, CELL
     jmp     .step
 
+; A jump's operand is an absolute offset into the stream, so the target is
+; where it says and not where it happens to be relative to. Both conditional
+; forms consume the cell they tested, which is why an "if" needs no POP.
+.op_jmp:
+    call    fetch_u32
+    jmp     .jump_to
+.op_jz:
+    call    fetch_u32
+    sub     r12, CELL
+    cmp     qword [r12], 0
+    je      .jump_to
+    jmp     .step
+.op_jnz:
+    call    fetch_u32
+    sub     r12, CELL
+    cmp     qword [r12], 0
+    jne     .jump_to
+    jmp     .step
+.jump_to:
+    lea     rcx, [code_buf]
+    lea     rbx, [rcx + rax]
+    jmp     .step
+
 .op_halt:
     mov     rax, [r12 - CELL]
     jmp     .out
@@ -152,25 +202,17 @@ vm_run:
     pop     rbx
     ret
 
-; Both helpers work on the loop's registers directly, which is why they are
-; here and not in a header. rdi = lhs, rsi = rhs, r12 lowered by two cells.
-pop2:
-    sub     r12, CELL * 2
-    mov     rdi, [r12]
-    mov     rsi, [r12 + CELL]
-    ret
-
 ; -> eax = the next four bytes of operand
 fetch_u32:
     mov     eax, dword [rbx]
     add     rbx, 4
     ret
 
-; rcx = where in the line this operator came from, for the caret
+; rcx = where in the source this operator came from, for the caret
 fetch_pos:
     mov     ecx, dword [rbx]
     add     rbx, 4
-    lea     rax, [line_buf]
+    lea     rax, [src_buf]
     add     rcx, rax
     ret
 
@@ -181,17 +223,55 @@ fetch_pos:
 vm_table:
     dq      vm_run.op_halt              ; OP_HALT
     dq      vm_run.op_push              ; OP_PUSH
-    dq      vm_run.op_add               ; OP_ADD
-    dq      vm_run.op_sub               ; OP_SUB
-    dq      vm_run.op_mul               ; OP_MUL
+    dq      vm_run.op_binary            ; OP_MUL
     dq      vm_run.op_div               ; OP_DIV
     dq      vm_run.op_mod               ; OP_MOD
+    dq      vm_run.op_binary            ; OP_ADD
+    dq      vm_run.op_binary            ; OP_SUB
+    dq      vm_run.op_binary            ; OP_SHL
+    dq      vm_run.op_binary            ; OP_SHR
+    dq      vm_run.op_binary            ; OP_LT
+    dq      vm_run.op_binary            ; OP_GT
+    dq      vm_run.op_binary            ; OP_LE
+    dq      vm_run.op_binary            ; OP_GE
+    dq      vm_run.op_binary            ; OP_EQ
+    dq      vm_run.op_binary            ; OP_NE
+    dq      vm_run.op_binary            ; OP_AND
+    dq      vm_run.op_binary            ; OP_XOR
+    dq      vm_run.op_binary            ; OP_OR
     dq      vm_run.op_neg               ; OP_NEG
+    dq      vm_run.op_not               ; OP_NOT
+    dq      vm_run.op_bnot              ; OP_BNOT
     dq      vm_run.op_pop               ; OP_POP
     dq      vm_run.op_load              ; OP_LOAD
     dq      vm_run.op_store             ; OP_STORE
     dq      vm_run.op_str               ; OP_STR
     dq      vm_run.op_printf            ; OP_PRINTF
+    dq      vm_run.op_jmp               ; OP_JMP
+    dq      vm_run.op_jz                ; OP_JZ
+    dq      vm_run.op_jnz               ; OP_JNZ
+
+; Indexed by opcode minus OP_BIN_FIRST, which is the same order the tokens
+; came in -- so this table, op_table in op.asm and the row in mode.asm are all
+; the same list read for three different purposes.
+    align   8
+op_routines:
+    dq      op_mul                      ; OP_MUL
+    dq      op_div                      ; OP_DIV
+    dq      op_mod                      ; OP_MOD
+    dq      op_add                      ; OP_ADD
+    dq      op_sub                      ; OP_SUB
+    dq      op_shl                      ; OP_SHL
+    dq      op_shr                      ; OP_SHR
+    dq      op_lt                       ; OP_LT
+    dq      op_gt                       ; OP_GT
+    dq      op_le                       ; OP_LE
+    dq      op_ge                       ; OP_GE
+    dq      op_eq                       ; OP_EQ
+    dq      op_ne                       ; OP_NE
+    dq      op_and                      ; OP_AND
+    dq      op_xor                      ; OP_XOR
+    dq      op_or                       ; OP_OR
 
 ; ---------------------------------------------------------------------------
     section .bss

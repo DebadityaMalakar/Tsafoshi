@@ -11,7 +11,7 @@
     global  exec_run
     global  exec_command
 
-    extern  ast_eval
+    extern  eval_program
     extern  code_compile
     extern  vm_run
     extern  disasm_all
@@ -25,10 +25,14 @@ W_ENGINE_LEN        equ 6               ; length of the word "engine"
 
     section .text
 
-; rdi = root node -> rax
+; rdi = the statement list, rsi = the trailing expression or zero -> rax.
+;
+; Both engines take the same pair, because the split is the language's and not
+; an engine's: statements run for effect, and a line answers with the last
+; expression on it if there was one.
 exec_run:
     cmp     qword [engine_bytecode], 0
-    je      ast_eval
+    je      eval_program
 
     call    code_compile
     cmp     qword [err_code], 0

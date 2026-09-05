@@ -20,14 +20,28 @@
 
     section .text
 
-; Interns the builtin names before any input is read, so BI_PRINTF and the
-; rest are the constants they claim to be.
+; Interns the reserved names before any input is read, so TK_IF, BI_PRINTF and
+; the rest are the constants they claim to be. The keywords come first and in
+; token order, because the lexer turns a slot below KW_COUNT straight into a
+; token kind by adding TK_KW_FIRST to it.
+;
+; rbx = the entry being interned
 names_init:
+    push    rbx
     mov     qword [name_count], 0
-    lea     rdi, [b_printf]
-    mov     esi, b_printf.len
+    lea     rbx, [reserved]
+.next:
+    mov     rdi, [rbx]
+    test    rdi, rdi
+    jz      .done
+    mov     rsi, [rbx + CELL]
     xor     edx, edx
-    jmp     name_intern
+    call    name_intern
+    add     rbx, CELL * 2
+    jmp     .next
+.done:
+    pop     rbx
+    ret
 
 ; rdi = text, rsi = length, rdx = position for errors -> rax = slot, or -1
 name_intern:
@@ -123,9 +137,49 @@ slot_text:
 ; ---------------------------------------------------------------------------
     section .data
 
+; The keywords, in TK_IF .. TK_INT order, then the builtins. Zero ends it.
+; This list and the TK_/BI_ constants in tsafoshi.inc are the same fact stated
+; twice; KW_COUNT is what keeps them honest.
+k_if:
+    db      "if"
+.len                equ $ - k_if
+k_else:
+    db      "else"
+.len                equ $ - k_else
+k_while:
+    db      "while"
+.len                equ $ - k_while
+k_do:
+    db      "do"
+.len                equ $ - k_do
+k_for:
+    db      "for"
+.len                equ $ - k_for
+k_break:
+    db      "break"
+.len                equ $ - k_break
+k_continue:
+    db      "continue"
+.len                equ $ - k_continue
+k_int:
+    db      "int"
+.len                equ $ - k_int
 b_printf:
     db      "printf"
 .len                equ $ - b_printf
+
+    align   8
+reserved:
+    dq      k_if, k_if.len
+    dq      k_else, k_else.len
+    dq      k_while, k_while.len
+    dq      k_do, k_do.len
+    dq      k_for, k_for.len
+    dq      k_break, k_break.len
+    dq      k_continue, k_continue.len
+    dq      k_int, k_int.len
+    dq      b_printf, b_printf.len
+    dq      0, 0
 
 ; ---------------------------------------------------------------------------
     section .bss

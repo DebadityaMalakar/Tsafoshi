@@ -2,12 +2,19 @@
 ;
 ; The read-eval-print loop. Entry point for the platform layer.
 ;
-; Every command now lives behind a colon. Until this stage the language had no
+; Every command lives behind a colon. Until stage 2.1 the language had no
 ; identifiers, so "mode" could safely be a whole line that meant something;
-; with variables it cannot, because "mode" is also a perfectly good name for
+; with variables it could not, because "mode" is also a perfectly good name for
 ; one. Rather than keep a list of words the user may not use, the colon takes
 ; the commands out of the language's namespace entirely -- there is no valid
 ; expression that begins with one, so the two can never be confused again.
+;
+; A submission is no longer a line. Blocks arrived at this stage and they do
+; not fit on one, so the loop keeps reading while braces are open, with a
+; continuation prompt of exactly the same width -- which is what lets the caret
+; land in the right column on the fourth line of a block as easily as the
+; first. Everything downstream is handed the whole submission and works in
+; offsets into it.
 
 %include "tsafoshi.inc"
 
@@ -22,13 +29,20 @@
     extern  exec_command
     extern  vars_command
     extern  line_buf
+    extern  src_begin
+    extern  src_append
+    extern  src_open_braces
+    extern  src_buf
     extern  names_init
+    extern  scope_init
+    extern  scope_unwind
     extern  lex_init
     extern  tok_kind
     extern  tok_pos
     extern  ast_reset
     extern  parse_line
     extern  parse_silent
+    extern  parse_value
     extern  exec_run
     extern  print_result
     extern  err_code
@@ -43,6 +57,7 @@
 
 repl_main:
     call    names_init
+    call    scope_init
     lea     rsi, [msg_banner]
     mov     rdx, msg_banner.len
     call    sys_write_stdout
@@ -59,23 +74,44 @@ repl_main:
     test    rax, rax
     jnz     .loop
 
+; A command is a whole submission and never continues onto another line, so it
+; is recognised before the braces are counted.
     lea     rdi, [line_buf]
     call    skip_blanks
     cmp     byte [rdi], ':'
     je      .command
 
     call    err_reset
+    call    src_begin
+.gather:
+    call    src_append
+    test    rax, rax
+    jz      .error                      ; the submission outgrew the buffer
+    call    src_open_braces
+    test    rax, rax
+    jz      .ready
+
+    lea     rsi, [msg_more]
+    mov     rdx, msg_more.len
+    call    sys_write_stdout
+    call    read_line
+    test    rax, rax
+    jz      .ready                      ; end of input closes what it can
+    jmp     .gather
+
+.ready:
     call    ast_reset
-    lea     rdi, [line_buf]
+    lea     rdi, [src_buf]
     call    lex_init
     call    parse_line
     cmp     qword [err_code], 0
     jne     .error
 
-    cmp     qword [tok_kind], TK_EOF    ; the whole line must be consumed
+    cmp     qword [tok_kind], TK_EOF    ; the whole submission must be consumed
     jne     .trailing
 
-    mov     rdi, rax                    ; parse built a tree; now run it
+    mov     rdi, rax                    ; the statements, then the value
+    mov     rsi, [parse_value]
     call    exec_run
     cmp     qword [err_code], 0
     jne     .error
@@ -120,7 +156,13 @@ repl_main:
 .trailing:
     mov     rdi, [tok_pos]
     call    err_trailing
+
+; A parse that failed inside a block never reached the closing brace, so the
+; scopes it opened are still open. Nothing else in the session would notice
+; until the next stray shadow, which is exactly the kind of bug worth not
+; having.
 .error:
+    call    scope_unwind
     call    err_report
     jmp     .loop
 
@@ -139,13 +181,20 @@ w_help:
     db      "help", 0
 
 msg_banner:
-    db      "Tsafoshi 0.4 -- stage 2.1: variables, assignment, printf", 10
+    db      "Tsafoshi 0.5 -- stage 2.2: if, while, for, blocks and scope", 10
     db      "commands start with a colon; ':help' lists them, ':quit' leaves", 10
-    db      'everything else is C: x = 2 + 3 * 4; printf("x is %d\n", x);', 10, 10
+    db      "everything else is C: int n = 5; while (n > 0) n = n - 1;", 10, 10
 .len                equ $ - msg_banner
 msg_prompt:
     db      "tsafoshi> "
 .len                equ $ - msg_prompt
+
+; The same width as the prompt above, and that is load-bearing: err_report
+; counts a column from the start of a line and adds PROMPT_LEN, which is only
+; right if every line was offered at the same indent.
+msg_more:
+    db      "     ...> "
+.len                equ $ - msg_more
 msg_help:
     db      "  :mode [name]      evaluation order: bodmas, ltr, rtl", 10
     db      "  :engine [name]    which engine runs a line: bytecode, tree", 10

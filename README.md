@@ -6,17 +6,21 @@ A **C99** interpreter written in x86-64 assembly. No compiler backend, no code
 generation, no ABI to fight — C source goes in, behaviour comes out. The host
 is hand-written assembly the whole way down.
 
-This is stage 2.1. It compiles to bytecode, runs it on a virtual machine, and
-now has variables and `printf`.
+This is stage 2.2. It compiles to bytecode, runs it on a virtual machine, and
+has variables, `printf`, and now real control flow: `if`, `while`, `for`,
+`do`, blocks and lexical scope.
 
 ```
-tsafoshi> x = 2 + 3 * 4
-= 14
-tsafoshi> y = x * 2; y
-= 28
-tsafoshi> printf("x is %d, y is %d\n", x, y)
-x is 14, y is 28
-= 17
+tsafoshi> int total = 0;
+tsafoshi> for (int i = 1; i <= 10; i = i + 1) {
+     ...>     if (i % 3 == 0) continue;
+     ...>     total = total + i;
+     ...> }
+tsafoshi> total
+= 37
+tsafoshi> printf("total is %d\n", total)
+total is 37
+= 12
 ```
 
 BODMAS by default, and the order is switchable — see [Order of
@@ -72,8 +76,8 @@ assistance, not as reviewed, production-grade work.
 | **1** | Precedence climbing, an AST, switchable evaluation order | **done** |
 | **1.5** | Bytecode: compile the tree, then run it in a dispatch loop, plus a disassembler | **done** |
 | **2.1** | Variables, assignment, statements, `printf` | **done** |
-| 2.2 | `if` / `while`, jumps, blocks and scope | next |
-| 2.3 | The VM call stack, and user-defined functions | |
+| **2.2** | `if` / `while` / `for` / `do`, jumps, blocks and scope | **done** |
+| 2.3 | The VM call stack, and user-defined functions | next |
 | 3 | Functions, pointers, arrays, `struct` | |
 | 4 | Native call bridge — real libc behind the builtins | |
 | 5 | Preprocessor: `#include` (standard headers ignored, user `.c` files included once), `#define`, `#if`, `__VA_ARGS__` | |
@@ -92,8 +96,8 @@ What choosing C99 specifically commits us to, beyond C89:
 
 | | |
 |---|---|
-| `//` comments | lexer, stage 2.2 |
-| Declarations anywhere in a block, and in `for` init | parser + scoping, stage 2.2 |
+| `//` comments | lexer, **done** at stage 2.2 |
+| Declarations anywhere in a block, and in `for` init | parser + scoping, **done** at stage 2.2 |
 | `long long`, `_Bool`, `<stdbool.h>`, `<stdint.h>` | type system, stage 3 |
 | Designated initializers, compound literals | stage 6 |
 | Flexible array members | stage 6 |
@@ -192,7 +196,8 @@ is available.
 ```
 tsafoshi> 100 - 20 - 5
 = 75
-tsafoshi> n = 0; n = n + 1; n = n + 1;
+tsafoshi> int n = 0;
+tsafoshi> n = n + 1; n = n + 1;
 tsafoshi> n
 = 2
 tsafoshi> printf("[%5d] [%-5d] [%05d]\n", 42, 42, -42)
@@ -204,18 +209,44 @@ tsafoshi> 4 / 0
             ^
 error: division by zero
 tsafoshi> 2 +
-            ^
-error: expected a number or '('
+             ^
+error: expected an expression
 tsafoshi> :quit
 ```
 
-Operators: `+ - * / %`, unary `-` and `+`, and parentheses. Values are 64-bit
-signed and wrap silently on overflow.
+A line is a sequence of statements, and a **bare expression at the end of one**
+is the line's value — which is the only reason the prompt has anything to
+echo. Put a `;` after it and it becomes a statement like any other, and
+nothing is printed. That is exactly the C distinction between a statement and
+the expression inside it, and the reason `n = n + 1;` prints nothing while `n`
+prints `= 2`.
 
-A line is a sequence of statements separated by `;`, and its value is the
-value of the last one. A **trailing** `;` suppresses the echo — which is
-exactly the C distinction between a statement and the expression inside it,
-and the reason `n = n + 1;` prints nothing while `n` prints `= 2`.
+### Operators
+
+The full C99 ladder below assignment, minus the ones that need types:
+
+| Level | Operators | |
+|---|---|---|
+| 10 | `*` `/` `%` | |
+| 9 | `+` `-` | |
+| 8 | `<<` `>>` | `>>` is arithmetic; every cell is signed until stage 3 |
+| 7 | `<` `>` `<=` `>=` | yield `1` or `0`, as C says |
+| 6 | `==` `!=` | |
+| 5 | `&` | |
+| 4 | `^` | |
+| 3 | `\|` | |
+| 2 | `&&` | short-circuits |
+| 1 | `\|\|` | short-circuits |
+
+Prefix `-` `+` `!` `~`, and parentheses. Values are 64-bit signed and wrap
+silently on overflow. A shift count outside 0..63 is undefined behaviour in
+C99; here it is what the hardware does, which is to use the low six bits.
+
+`&&` and `||` are the only two operators with no opcode behind them. Both
+operands would have to be values before `op.asm` could be handed them, and
+that is the one thing short-circuiting forbids — so they compile to a branch
+and two constants instead, and the tree walker reaches the same answer by
+simply not recursing.
 
 ### Commands
 
@@ -238,24 +269,33 @@ of words you may not use, the colon moves the commands out of the language's
 namespace entirely — no valid expression begins with one, so the two can never
 collide again.
 
-## Variables
+## Variables, and why they now need declaring
 
-No declarations yet, and no types. A name springs into existence on first use,
-holds one 64-bit cell, and survives for the session:
+A variable is declared with `int`, which is the only type there is until stage
+3 and carries no meaning yet beyond "one cell":
 
 ```
-tsafoshi> a = 10
-= 10
+tsafoshi> int a = 10, b, c;
 tsafoshi> b = c = 3
 = 3
 tsafoshi> a * b + c
 = 33
+tsafoshi> undeclared
+          ^
+error: undeclared identifier
 ```
 
-Assignment is an **expression**, not a statement, exactly as in C: it folds
-rightward, so `b = c = 3` assigns to both, and it leaves its value behind, so
-the prompt has something to echo. Its left side has to be a name, and that is
-checked after the left side is parsed rather than by looking ahead:
+Through stage 2.1 a name sprang into existence on first use and an unassigned
+one read as `0`. That was a deliberate placeholder: with no declarations there
+was nothing to call *undeclared*. Scope is what makes the question answerable,
+so this is where it gets answered, and C99's answer is the one taken — no
+implicit declarations, and a typo is an error rather than a new variable that
+happens to be zero.
+
+Assignment is still an **expression**, not a statement. It folds rightward, so
+`b = c = 3` assigns to both, and it leaves its value behind, so the prompt has
+something to echo. Its left side has to be a name, and that is checked after
+the left side is parsed rather than by looking ahead:
 
 ```
 tsafoshi> 5 = 3
@@ -263,142 +303,124 @@ tsafoshi> 5 = 3
 error: left of '=' is not a variable
 ```
 
-A variable that has never been assigned reads as `0` rather than as an error.
-That is a deliberate placeholder: with no declarations there is nothing yet to
-call *undeclared*, and stage 2.2 introduces scope, which is where the question
-properly belongs.
+## Control flow
 
-Names are interned once, into a slot number that is stable for the whole
-session. The compiler resolves a name exactly once, at compile time; the VM
-only ever indexes. `names.asm` owns the text and `vars.asm` owns the cells,
-and neither looks at the other's half.
-
-## printf
-
-`printf` is a builtin, and for now the only one. It is a real format-string
-interpreter rather than a special case in the parser:
+`if` / `else`, `while`, `do`-`while`, `for`, `break` and `continue`, all with
+C99's semantics:
 
 ```
-tsafoshi> printf("%s, %s and %c\n", "north", "star", 33)
-north, star and !
-= 18
+tsafoshi> int n = 27; int steps = 0;
+tsafoshi> while (n != 1) {
+     ...>     if (n % 2 == 0) n = n / 2; else n = 3 * n + 1;
+     ...>     steps = steps + 1;
+     ...> }
+tsafoshi> steps
+= 111
 ```
 
-| | |
-|---|---|
-| Conversions | `d` `i` `u` `x` `X` `o` `c` `s` `p`, and `%%` |
-| Flags | `-` (left-align) and `0` (zero-pad) |
-| Width | a decimal count |
-| Precision | `.n`, applied to `%s` |
-| Length modifiers | `l` `ll` `h` `hh` `z` `j` `t` — parsed and ignored |
-
-The length modifiers are ignored because every value is one cell; they are
-accepted so that C source keeps working when types arrive. Zero padding goes
-*after* a minus sign, so `%05d` of `-42` is `-0042` and not `00-42`.
-
-It returns the number of bytes written, like C's does, which is why the last
-example echoes `= 18`.
-
-Two places where it is deliberately stricter than C:
+A declaration may not be the whole body of an `if` or a loop, because there
+would be no block for it to be scoped to and it would silently leak into the
+enclosing one:
 
 ```
-tsafoshi> printf("%d %d\n", 1)
-1           ^
-error: not enough arguments for format string
-tsafoshi> printf("%q\n", 1)
+tsafoshi> if (1) int x = 1;
+                 ^
+error: a declaration needs a block of its own
+```
+
+`break` and `continue` are checked while parsing, which is the only pass that
+knows which statements are inside a loop — so the caret lands on the word
+itself rather than somewhere in the generated code:
+
+```
+tsafoshi> continue;
           ^
-error: unknown conversion in format string
+error: not inside a loop
 ```
 
-Both are undefined behaviour in C. Here the argument count is known at run
-time, so there is no reason to read past the end of it. (The `1` before the
-caret is real: printf writes as it goes, so whatever was already converted has
-already been printed by the time the error is raised.)
+In a `for` loop, `continue` still runs the step. That is the whole reason
+`for` is not simply a `while` with the step written at the bottom, and both
+engines have to get it right separately: the VM by choosing where the label
+goes, the tree walker by choosing when to clear the flag.
 
-String literals decode the C escapes — `\n \t \\ \" \'` and the rest, plus
-octal `\101` and hexadecimal `\x41`. They are interned like names and, like
-names, never released: a literal's value is its address, a variable can hold
-that address, so it has to outlive the line it was written on. Interning is
-what makes that affordable — the same literal typed twice costs nothing the
-second time.
+## Blocks and scope
 
-A string used as a number gives you its address, because there are no types
-yet to stop you. That is honest rather than intended, and it stops being
-possible at stage 3.
-
-## No `#include`, and where `main` goes
-
-**The standard library is already there.** This is an interpreter, not a
-compiler driver, so there is no separate translation unit to declare things
-into and no linker to resolve them afterwards. `printf` is resolved by name
-inside the host, at parse time, and it works whether or not you ever mention
-`<stdio.h>`:
+A block is a list of statements and a scope, and the scope is the entire point
+of the braces:
 
 ```
-tsafoshi> printf("no header, no ceremony\n")
-no header, no ceremony
-= 23
+tsafoshi> int x = 1;
+tsafoshi> { int x = 2; x = x * 10; }
+tsafoshi> x
+= 1
+tsafoshi> :vars
+  x = 1
 ```
 
-That is the same arrangement as any hosted interpreter — Python does not make
-you declare `print`. The library functions arrive as builtins now and get
-bridged to real libc at stage 4; either way they are part of the environment
-rather than something you import.
+Until this stage a variable *was* its name — the cell array was indexed by the
+interned identifier, so there was exactly one `x` in the session and no way to
+have a second. Now a name is resolved, once, while parsing, to a **storage
+slot**; a block records a mark, and closing it discards both the bindings and
+the storage they were using. Lookup runs backwards through the bindings, so the
+innermost declaration wins, and that is all shadowing is.
 
-**Which does not make `#include` an error.** Real C source has those lines at
-the top and must keep working unchanged. When the preprocessor lands at stage
-5, `#include` of a standard header is *accepted and ignored*: the name is
-recognised, nothing is pulled in, and the program runs. So this:
+The storage really is reclaimed, so a hundred sequential blocks each declaring
+a variable cost one slot between them rather than a hundred.
 
-```c
-#include <stdio.h>
+By the time anything runs, no scope exists. The tree carries slot numbers, both
+engines index them, and neither has any idea an identifier was ever involved.
+That seam is deliberate: at stage 2.3 a slot becomes an offset into a call
+frame, and only `scope.asm` has to notice.
 
-int main(void) {
-    printf("hello\n");
-    return 0;
-}
+It is also visible in the listing. `:dis` prints the name where one is still
+bound and the raw slot where there is not, because after a block closes the
+name is genuinely gone:
+
+```
+tsafoshi> :dis
+tsafoshi> { int local = 7; local; }
+    0000  push   7
+    0009  store  $1
+    0014  pop
+    0015  load   $1
+    0020  pop
+    0021  push   0
+    0030  halt
 ```
 
-is intended to run byte-for-byte as written, with the first line doing
-nothing at all.
+## Several lines at a time
 
-**Your own code gets included as `.c`, not as a header.** A header exists to
-solve a problem this project does not have. In C, a definition is compiled
-once into one translation unit, and every *other* translation unit needs a
-declaration to typecheck the call against — the linker joins them up
-afterwards. There is no separate compilation here and no linker, so there is
-nothing to match against: the definition is either loaded or it is not.
+A block does not fit on a line, so a submission is no longer a line. The REPL
+keeps reading while braces are open and offers a continuation prompt:
 
-```c
-#include "list.c"        /* the implementation, directly */
+```
+tsafoshi> for (int i = 0; i < 3; i = i + 1) {
+     ...>     printf("%d ", i);
+     ...> }
+0 1 2
 ```
 
-Which means no `.h` beside every `.c`, no prototype kept in sync with the
-function under it, and no forward declarations written only to satisfy an
-ordering rule. Including a `.h` still *works* — it is just a file, and the
-preprocessor does not care what it is called — but the idiom here is to
-include the source.
+Only braces are counted, and quotes and comments are skipped while counting —
+a `{` inside a string closes nothing. An unbalanced *parenthesis* is a typo and
+is reported, not waited on.
 
-The catch is the one every C programmer already knows in a different form.
-Textual inclusion of the same file twice would define everything in it twice,
-and the classic answer is an include guard. Here, **including a path that has
-already been included is a no-op** — `#pragma once` semantics, always on, by
-path. Guards still work if you write them; they are simply not load-bearing.
-That is a real divergence from C99, and it is a deliberate one: the behaviour
-it removes is a hazard, not a feature.
+The continuation prompt is exactly as wide as the main one, and that is
+load-bearing rather than cosmetic: a caret is placed by measuring a column from
+the start of the line the error is on and adding the prompt width, so it lands
+correctly on the fourth line of a block for the same reason it does on the
+first.
 
-**`main(void)` is still the entry point.** The REPL, where top-level
-statements run as you type them, is the *interactive* mode and a convenience.
-A `.c` file handed to the interpreter is a C program in the ordinary sense:
-execution begins at `main`, its return value is the exit status, and falling
-off the end of `main` means `return 0` exactly as C99 says. Both `int
-main(void)` and `int main(int argc, char **argv)` will be accepted, and
-nothing else — the standard's two forms, not K&R's.
+## Comments
 
-None of this is implemented yet: `main` needs functions, which is stage 2.3,
-and `#include` needs the preprocessor, which is stage 5. It is written down
-here because these are decisions rather than discoveries, and each of them
-constrains what the stages in between are allowed to do.
+`/* ... */` and, because this is C99 and not C89, `//` to end of line. Both are
+skipped by the same loop that skips whitespace, since nothing above the lexer
+can tell the difference:
+
+```
+tsafoshi> int r = 6 /* six */ * 7;  // forty-two
+tsafoshi> r
+= 42
+```
 
 ## Bytecode
 
@@ -408,13 +430,25 @@ runs that in a dispatch loop. `:dis` shows the middle step:
 ```
 tsafoshi> :dis
 disassembly: on
-tsafoshi> total = x + n
-    0000  load   x
-    0005  load   n
-    0010  add
-    0011  store  total
-    0016  halt
-= 16
+tsafoshi> int i; int s = 0;
+tsafoshi> while (i < 3) { s = s + i; i = i + 1; }
+    0000  load   i
+    0005  push   3
+    0014  lt
+    0015  jz     ->0063
+    0020  load   s
+    0025  load   i
+    0030  add
+    0031  store  s
+    0036  pop
+    0037  load   i
+    0042  push   1
+    0051  add
+    0052  store  i
+    0057  pop
+    0058  jmp    ->0000
+    0063  push   0
+    0072  halt
 ```
 
 A stack machine over 64-bit cells, one byte of opcode, and an operand only
@@ -424,31 +458,67 @@ where one is needed:
 |---|---|---|
 | `halt` | | stop; the answer is on top of the stack |
 | `push` | 8-byte immediate | push it |
-| `add` `sub` `mul` `div` `mod` | `div` and `mod` take a 4-byte column | pop two, push the result |
-| `neg` | | negate the top |
+| `mul` `div` `mod` `add` `sub` | `div` and `mod` take a 4-byte column | pop two, push the result |
+| `shl` `shr` `lt` `gt` `le` `ge` `eq` `ne` `and` `xor` `or` | | likewise |
+| `neg` `not` `bnot` | | rewrite the top in place |
 | `pop` | | discard the top |
-| `load` `store` | 4-byte name slot | read a variable, or write one |
+| `load` `store` | 4-byte storage slot | read a variable, or write one |
 | `str` | 4-byte arena offset | push a literal's address |
 | `printf` | 4-byte count, then a 4-byte column | consume that many arguments, push the byte count |
+| `jmp` | 4-byte target | go there |
+| `jz` `jnz` | 4-byte target | pop one cell, go there if it was / was not zero |
 
-The binary opcodes are numbered in token order, so an operator token becomes
-its opcode with a subtract and an add rather than a table lookup.
+The sixteen binary opcodes are numbered in token order, so the compiler turns
+an operator token into its opcode with a subtract and an add rather than a
+table lookup — and the VM, which still has the opcode in a register when the
+handler is entered, indexes one table of `op.asm` routines with it. Sixteen
+operators, one arm of the dispatch loop.
 
 `store` leaves its value on the stack, because assignment is an expression;
-`pop` is what discards the values nobody wanted, one per statement but the
-last. The listing shows a slot as the name it came from and distinguishes its
-two kinds of offset: `@n` is a column in the source line, `+n` an offset into
-the string arena.
+`pop` is what discards the values nobody wanted. Two invariants hold the whole
+compiler up — **an expression leaves exactly one cell behind, and a statement
+leaves none** — and everything else follows from them: why an expression
+statement ends in a `pop`, why a declaration does, why a list of statements
+needs no cleanup at the end, and why the operand stack is never checked for
+underflow at run time.
+
+The listing distinguishes three kinds of number, because they live in three
+different spaces: `@n` is a column in the source, `+n` an offset into the
+string arena, and `->n` an offset into the listing itself.
 
 `div`, `mod` and `printf` are the only operations that can fail, and by the
 time the VM is running there is no tree left to ask where they came from — so
-those three carry the column they were written at, and a division by zero
-still gets its caret in the right place. Nothing else pays for that.
+those three carry the column they were written at, and a division by zero still
+gets its caret in the right place. Nothing else pays for that.
 
 `printf` is one opcode rather than a calling convention because its arguments
 are *already* contiguous and in order on the operand stack, which is exactly
 the array a format-string interpreter wants. The tree walker has to build that
 array by hand; the VM just passes a pointer into its own stack.
+
+### Jumps, and holes that remember each other
+
+A tree has no addresses in it, so control flow is where one has to be invented.
+A forward jump is emitted before anyone knows where it goes, with a hole where
+the target belongs, and the hole is filled in once the target is known.
+
+`break` is harder, because a loop may contain any number of them and none can
+be patched until the loop ends. Rather than keep a list, each unpatched hole
+holds **the offset of the previous one** — so the jumps are threaded through
+each other, an arbitrary number of breaks costs one word per loop, and nothing
+is allocated. Offset zero is free to mean "end of chain" because the first byte
+of the stream is always an opcode and never an operand.
+
+The three loops are one emitter with the tests moved:
+
+```
+while   top: cond, jz end,  body, cont:        jmp top,  end:
+for     top: cond, jz end,  body, cont: step,  jmp top,  end:
+do      top:                body, cont: cond,  jnz top,  end:
+```
+
+Where `cont` lands is the whole of what makes `continue` correct in each: the
+step still runs in a `for`, and the condition still gets tested in a `do`.
 
 ### Two engines, on purpose
 
@@ -461,12 +531,19 @@ Both call the same routines in `op.asm`, so they cannot disagree about what
 `%` means — only about order, operand plumbing, and the encoding. Those are
 exactly the things a new execution layer gets wrong.
 
+Control flow is where they stop resembling each other, and that is when the
+arrangement starts earning its keep. The VM jumps: `break` is an address. A
+recursive walker cannot jump out of its own call chain, so it sets a flag and
+every statement rule tests it on the way back out. Two genuinely different
+mechanisms, one required answer.
+
 ## Order of operations
 
-The default is **BODMAS**: brackets first, then `* / %`, then `+ -`, with
-equal-strength operators folded left. That is also exactly what C99 specifies
-for these operators, so the default needs no apology and will not have to
-change when the rest of the language arrives.
+The default is **BODMAS**: brackets first, then `* / %`, then `+ -`, and so on
+down the C99 ladder, with equal-strength operators folded left. That is exactly
+what C99 specifies, so the default needs no apology — and the rows below did
+not have to be renumbered when eleven more operators arrived at this stage,
+because the ladder had their levels reserved from the start.
 
 The order is a runtime setting rather than a fact baked into the parser:
 
@@ -501,10 +578,15 @@ accepted and folds rightward. A mode is therefore a five-byte precedence row
 plus that one flag, and the two flat modes are the same row with different
 bumps.
 
-Adding the rest of C99's binary operators means adding tokens and widening
-those rows. The `PREC_*` ladder in `tsafoshi.inc` is already numbered for it:
-shifts, comparisons, equality and the bitwise operators have their C99 levels
-reserved at 5 through 8, so nothing that already exists gets renumbered.
+That reservation has now been spent. Shifts, comparisons, equality and the
+bitwise operators took the levels held for them, and a mode is still a single
+row of bytes plus the bump — eighteen bytes now rather than five, and not one
+line of `parser.asm` changed to widen it.
+
+The two short-circuiting operators sit at the end of that row. They carry a
+precedence like everything else, so the climbing loop handles them; they are
+simply not operators `op.asm` can be asked for, which the token numbering says
+out loud by stopping the evaluable range one short of them.
 
 ## Layout
 
@@ -514,9 +596,10 @@ src/
   core/                 platform-independent, assembled once
     tsafoshi.inc        shared constants and token kinds
     repl.asm            the read-eval-print loop
-    readline.asm        buffered line input
-    lexer.asm           source text -> tokens
+    readline.asm        buffered line input, and the multi-line submission
+    lexer.asm           source text -> tokens, comments and all
     names.asm           identifier interning: text -> a stable slot
+    scope.asm           lexical scope: a name -> the storage slot it means
     strings.asm         string literals: escapes, and an arena that interns
     parser.asm          tokens -> a syntax tree (structure only)
     ast.asm             node storage: one arena, reset per line
@@ -557,10 +640,12 @@ The build is `src/main.asm` plus `src/core/*.asm` plus exactly one
 | lexer → names, strings | `name_intern` and `str_intern` — a lexeme becomes a value in the lexer, so the parser never sees characters |
 | parser → ast | `ast_num` / `ast_binary` / `ast_var` / `ast_call` and the rest, each returning a node or zero |
 | parser → mode | `mode_prec(kind)` and `mode_bump` — the parser never hardcodes an order |
-| tree → engine | `exec_run(root)`, which is either `ast_eval` or `code_compile` then `vm_run` |
+| parser → scope | `scope_declare(name)` and `scope_lookup(name)` — an identifier goes in, a storage slot comes out, once |
+| tree → engine | `exec_run(statements, value)`, which is either `eval_program` or `code_compile` then `vm_run` |
 | engine → op | `op_apply(lhs, rhs, kind, pos)` and the `op_*` routines — the engine decides order, `op.asm` produces every value |
 | engine → vars | `var_get(slot)` / `var_set(slot, value)` — slots only, never text |
 | engine → printf | `printf_run(args, count, pos)` — one array of cells, whichever engine built it |
+| compiler → code | `code_op` / `code_i64` / `code_u32` to write, and `code_jump` / `code_patch` for a jump whose target is not known yet |
 | compiler → vm | the code buffer in `code.asm`; neither module owns the memory, so `disasm.asm` reads it without either knowing |
 | anything → error | `err_expected` / `err_divzero` / `err_notlvalue` / `err_badconv` and the rest, each taking a position |
 | core → platform | the four `sys_*` routines below |
@@ -574,10 +659,23 @@ the same tree, and not one line of the lexer or the parser moved to get it.
 through jump tables, indexed by token kind, node kind, node kind and opcode
 respectively.
 
+Four of those tables are the same list read four ways. The operator tokens are
+numbered in C99 precedence order; `mode.asm`'s row, `op.asm`'s table, the
+opcode numbering and the VM's routine table all follow that order, so adding an
+operator means adding one line to each rather than reasoning about any of
+them.
+
 Every AST node is the same five cells whatever its kind — the three pointer
-slots get reused rather than added to, so an argument list and a statement
-chain cost the same per link as a binary operator does. `tsafoshi.inc` records
-which slot means what.
+slots get reused rather than added to, so a `while` loop, an argument list and
+a binary operator all cost the same. `tsafoshi.inc` records which slot means
+what. Because the shape never varies, every constructor in `ast.asm` is the
+same routine with its arguments in a different order, which is exactly how it
+is written.
+
+`for` is the one rule that wanted a fourth slot, and did not get one. Its init
+clause is lifted out into an ordinary statement in front of the loop, inside
+the scope the rule opens for it — which is also precisely what C99 says the
+scope of `for (int i = ...)` is, so the shortcut and the standard agree.
 
 Nodes come out of a bump-allocated arena that the REPL resets once per line,
 so a tree costs one pointer bump per node and nothing at all to free. Running
