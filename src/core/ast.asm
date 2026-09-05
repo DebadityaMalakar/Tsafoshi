@@ -4,6 +4,12 @@
 ; bump-allocated arena that the REPL resets once per line, so a tree costs one
 ; pointer bump per node and nothing at all to free.
 ;
+; "Resets" now means "rewinds to a watermark". A function definition has to
+; keep its body -- the tree walker runs that body on every call, possibly long
+; after the line it was typed on -- so ast_commit raises the mark and the
+; nodes below it are never handed out again. Per-line trees still cost nothing
+; to free, because there is still nothing to free.
+;
 ; The parser builds these; eval.asm and compile.asm walk them. None of them
 ; knows how the others work, which is the whole point of having the tree in
 ; between.
@@ -18,7 +24,9 @@
 
 %include "tsafoshi.inc"
 
+    global  ast_init
     global  ast_reset
+    global  ast_commit
     global  ast_num
     global  ast_unary
     global  ast_binary
@@ -34,14 +42,28 @@
     global  ast_if
     global  ast_loop
     global  ast_leaf
+    global  ast_return
+    global  ast_invoke
 
     extern  err_toobig
 
     section .text
 
-ast_reset:
+ast_init:
     lea     rax, [ast_arena]
+    mov     [ast_base], rax
     mov     [ast_next], rax
+    ret
+
+ast_reset:
+    mov     rax, [ast_base]
+    mov     [ast_next], rax
+    ret
+
+; Everything allocated so far is permanent from here on.
+ast_commit:
+    mov     rax, [ast_next]
+    mov     [ast_base], rax
     ret
 
 ; rdi = kind, rsi = VAL, rdx = LHS, rcx = RHS, r8 = position -> rax = the node,
@@ -102,21 +124,26 @@ ast_logical:
     mov     edi, NT_LOGICAL
     jmp     ast_make
 
-; rdi = storage slot, rsi = position -> rax
+; The three variable nodes carry the storage kind in RHS, because a slot number
+; on its own does not say which array it indexes -- and by the time an engine
+; sees one, the scope that knew is gone.
+;
+; rdi = storage slot, rsi = VAR_GLOBAL or VAR_LOCAL, rdx = position -> rax
 ast_var:
-    mov     r8, rsi
+    mov     r8, rdx
+    mov     rcx, rsi
     mov     rsi, rdi
     xor     edx, edx
-    xor     ecx, ecx
     mov     edi, NT_VAR
     jmp     ast_make
 
-; rdi = storage slot, rsi = the value expression, rdx = position -> rax
+; rdi = storage slot, rsi = the value expression, rdx = storage kind,
+; rcx = position -> rax
 ast_assign:
-    mov     r8, rdx
+    mov     r8, rcx
+    mov     rcx, rdx
     mov     rdx, rsi
     mov     rsi, rdi
-    xor     ecx, ecx
     mov     edi, NT_ASSIGN
     jmp     ast_make
 
@@ -168,13 +195,35 @@ ast_expr:
     mov     edi, NT_EXPR
     jmp     ast_make
 
-; rdi = storage slot, rsi = the initialiser or zero, rdx = position -> rax
+; rdi = storage slot, rsi = the initialiser or zero, rdx = storage kind,
+; rcx = position -> rax
 ast_decl:
-    mov     r8, rdx
+    mov     r8, rcx
+    mov     rcx, rdx
     mov     rdx, rsi
     mov     rsi, rdi
-    xor     ecx, ecx
     mov     edi, NT_DECL
+    jmp     ast_make
+
+; rdi = the value expression or zero, rsi = position -> rax
+ast_return:
+    mov     r8, rsi
+    mov     rdx, rdi
+    xor     esi, esi
+    xor     ecx, ecx
+    mov     edi, NT_RETURN
+    jmp     ast_make
+
+; A call to a function the session defined, as against NT_CALL's builtin. The
+; two are different nodes because they are different mechanisms: a builtin is a
+; routine in this binary, and this is a frame and a jump.
+; rdi = function id, rsi = argument chain, rdx = count, rcx = position -> rax
+ast_invoke:
+    mov     r8, rcx
+    mov     rcx, rdx
+    mov     rdx, rsi
+    mov     rsi, rdi
+    mov     edi, NT_INVOKE
     jmp     ast_make
 
 ; rdi = condition, rsi = the then branch, rdx = the else branch or zero,
@@ -211,6 +260,8 @@ ast_leaf:
     section .bss
 
     alignb  8
+ast_base:
+    resq    1
 ast_next:
     resq    1
 ast_arena:

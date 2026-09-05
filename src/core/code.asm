@@ -1,15 +1,24 @@
 ; SPDX-License-Identifier: MIT
 ;
-; The code buffer: storage for one compiled line, the writes that fill it, and
-; the two routines that let a jump be emitted before anyone knows where it
-; goes. Like the AST arena this is reset per line and never freed.
+; The code buffer: storage for compiled code, the writes that fill it, and the
+; two routines that let a jump be emitted before anyone knows where it goes.
+; Like the AST arena this is a bump allocator with a watermark: a line's code
+; is thrown away by rewinding, and a function's is kept by raising the mark.
+;
+; So the buffer holds every function ever defined, in definition order, with
+; the current line's code sitting on top of them and being overwritten by the
+; next. Nothing is ever moved, which is why an entry point can be a plain
+; offset and stay valid for the session.
 ;
 ; compile.asm writes here; vm.asm and disasm.asm read. None of them owns the
 ; memory, so adding a fourth reader costs nothing.
 
 %include "tsafoshi.inc"
 
+    global  code_init
     global  code_reset
+    global  code_commit
+    global  code_base
     global  code_op
     global  code_i64
     global  code_u32
@@ -23,8 +32,21 @@
 
     section .text
 
-code_reset:
+code_init:
+    mov     qword [code_base], 0
     mov     qword [code_len], 0
+    ret
+
+; -> rax = where the code about to be written will start
+code_reset:
+    mov     rax, [code_base]
+    mov     [code_len], rax
+    ret
+
+; Keeps what has just been written, and returns where the next thing goes.
+code_commit:
+    mov     rax, [code_len]
+    mov     [code_base], rax
     ret
 
 ; Each writer refuses rather than runs past the end; the first refusal records
@@ -95,6 +117,8 @@ code_patch:
     section .bss
 
     alignb  8
+code_base:
+    resq    1
 code_len:
     resq    1
 code_buf:

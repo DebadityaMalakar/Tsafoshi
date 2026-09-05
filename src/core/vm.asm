@@ -45,19 +45,34 @@
     extern  op_bnot
     extern  var_get
     extern  var_set
+    extern  var_local_get
+    extern  var_local_set
+    extern  frame_enter
+    extern  frame_leave
+    extern  frame_args
+    extern  frame_reset
+    extern  func_arity
+    extern  func_frame
+    extern  func_entry
     extern  str_addr
     extern  printf_run
     extern  err_code
     extern  err_deep
+    extern  err_stackfull
 
     section .text
 
-; -> rax = the value HALT finds on the stack.
+; rdi = where to start -> rax = the value HALT finds on the stack.
 ; rbx = instruction pointer, r12 = one past the top of the operand stack
 vm_run:
     push    rbx
     push    r12
+    push    rdi
+    call    frame_reset
+    pop     rdi
+    mov     qword [vm_depth], 0
     lea     rbx, [code_buf]
+    add     rbx, rdi
     lea     r12, [vm_stack]
 
 .step:
@@ -166,6 +181,88 @@ vm_run:
     add     r12, CELL
     jmp     .step
 
+; A local is an offset from the frame of the call that is running, so the same
+; instruction reads a different cell on every recursion. That is the whole of
+; what a frame pointer buys, and the only reason these two opcodes exist
+; alongside LOAD and STORE.
+.op_loadl:
+    call    fetch_u32
+    mov     rdi, rax
+    call    var_local_get
+    jmp     .push_grow
+.op_storel:
+    call    fetch_u32
+    mov     rdi, rax
+    mov     rsi, [r12 - CELL]
+    call    var_local_set
+    jmp     .step
+
+; A call: enter a frame, move the arguments into its first slots, remember
+; where to come back to, and jump. The arguments are already contiguous and in
+; order on the operand stack, so moving them is one copy.
+;
+; r8 = the function, r9 = its arity
+.op_call:
+    call    fetch_u32
+    mov     r8, rax
+    mov     rdi, r8
+    call    func_arity
+    mov     r9, rax
+    mov     rcx, [vm_depth]
+    cmp     rcx, CALL_DEPTH
+    jae     .too_deep
+    mov     rdi, r8
+    call    func_frame
+    push    r8
+    push    r9
+    mov     rdi, rax
+    lea     rsi, [src_buf]
+    call    frame_enter                 ; rax = the caller's frame pointer
+    pop     r9
+    pop     r8
+    cmp     rax, -1
+    je      .fail
+
+    mov     rcx, [vm_depth]
+    shl     rcx, 4                      ; two cells per record
+    lea     rdx, [vm_calls]
+    add     rdx, rcx
+    mov     [rdx + CELL], rax
+    lea     rcx, [code_buf]
+    mov     rsi, rbx
+    sub     rsi, rcx                    ; the return address, as an offset
+    mov     [rdx], rsi
+    inc     qword [vm_depth]
+
+    mov     rax, r9
+    imul    rax, rax, CELL
+    sub     r12, rax                    ; the arguments come off the stack
+    mov     rdi, r12
+    mov     rsi, r9
+    call    frame_args
+    mov     rdi, r8
+    call    func_entry
+    jmp     .jump_to
+
+; The return value is already on top of the operand stack and stays there,
+; which is exactly what the caller's expression was waiting for.
+.op_ret:
+    dec     qword [vm_depth]
+    mov     rcx, [vm_depth]
+    shl     rcx, 4
+    lea     rdx, [vm_calls]
+    add     rdx, rcx
+    mov     rsi, [rdx]
+    mov     rdi, [rdx + CELL]
+    call    frame_leave
+    mov     rax, rsi
+    jmp     .jump_to
+
+.too_deep:
+    lea     rdi, [src_buf]
+    call    err_stackfull
+    jmp     .fail
+
 ; A jump's operand is an absolute offset into the stream, so the target is
 ; where it says and not where it happens to be relative to. Both conditional
 ; forms consume the cell they tested, which is why an "if" needs no POP.
@@ -250,6 +347,10 @@ vm_table:
     dq      vm_run.op_jmp               ; OP_JMP
     dq      vm_run.op_jz                ; OP_JZ
     dq      vm_run.op_jnz               ; OP_JNZ
+    dq      vm_run.op_loadl             ; OP_LOADL
+    dq      vm_run.op_storel            ; OP_STOREL
+    dq      vm_run.op_call              ; OP_CALL
+    dq      vm_run.op_ret               ; OP_RET
 
 ; Indexed by opcode minus OP_BIN_FIRST, which is the same order the tokens
 ; came in -- so this table, op_table in op.asm and the row in mode.asm are all
@@ -280,3 +381,7 @@ op_routines:
 vm_stack:
     resq    VM_STACK_CAP
 vm_stack_end:
+vm_depth:
+    resq    1
+vm_calls:
+    resq    CALL_DEPTH * 2

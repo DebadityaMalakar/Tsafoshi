@@ -14,7 +14,7 @@
 CELL                equ 8
 
 LINE_CAP            equ 1024            ; one physical line of input
-SRC_CAP             equ 8192            ; one submission, however many lines
+SRC_CAP             equ 65536           ; every submission of the session
 RD_CAP              equ 4096
 NUM_CAP             equ 24
 PROMPT_LEN          equ 10              ; width of both prompts, for the caret
@@ -74,6 +74,8 @@ TK_FOR              equ 36
 TK_BREAK            equ 37
 TK_CONTINUE         equ 38
 TK_INT              equ 39
+TK_RETURN           equ 40
+TK_VOID             equ 41
 
 TK_OP_FIRST         equ TK_STAR         ; the whole precedence-carrying class
 TK_OP_LAST          equ TK_OROR
@@ -116,6 +118,8 @@ NT_FOR              equ 15
 NT_BREAK            equ 16
 NT_CONTINUE         equ 17
 NT_EMPTY            equ 18
+NT_RETURN           equ 19
+NT_INVOKE           equ 20
 
 ; AST node layout. Five cells; see "The 64-bit cell rule". The three pointer
 ; slots are reused rather than widened, so every node stays the same size:
@@ -138,6 +142,13 @@ NT_EMPTY            equ 18
 ; NT_DO       LHS = condition, RHS = body
 ; NT_FOR      LHS = condition or zero, RHS = body, VAL = the step or zero
 ; NT_BREAK  NT_CONTINUE  NT_EMPTY   carry nothing but a position
+; NT_RETURN   LHS = the value expression or zero
+; NT_INVOKE   VAL = function id, LHS = argument chain, RHS = argument count
+;
+; NT_VAR, NT_ASSIGN and NT_DECL keep one more thing in RHS: whether the slot
+; in VAL is a global cell or an offset into the current call frame. It is the
+; one bit of a variable's identity that survives the parser, because it is the
+; one the engines cannot work out for themselves.
 NODE_KIND           equ 0
 NODE_VAL            equ CELL
 NODE_LHS            equ CELL * 2
@@ -145,7 +156,7 @@ NODE_RHS            equ CELL * 3
 NODE_POS            equ CELL * 4
 NODE_SIZE           equ CELL * 5
 
-AST_CAP             equ 4096            ; nodes per line, then "too complex"
+AST_CAP             equ 16384           ; nodes at once, then "too complex"
 
 ; Identifiers. Names are interned once and never released, so a slot is stable
 ; for the whole session and a variable survives the line that created it.
@@ -154,7 +165,7 @@ NAME_LEN            equ 32              ; bytes per name, NUL included
 
 ; Keywords and builtin functions occupy the first name slots, interned before
 ; any input is read, so recognising either is a compare against a constant.
-KW_COUNT            equ 8               ; TK_IF .. TK_INT
+KW_COUNT            equ 10              ; TK_IF .. TK_VOID
 BI_PRINTF           equ KW_COUNT
 BI_COUNT            equ KW_COUNT + 1    ; the first slot a user name can have
 
@@ -162,9 +173,21 @@ ARG_MAX             equ 16              ; arguments in one call
 
 ; Variables. A storage slot is handed out by scope.asm at declaration and is
 ; what every engine indexes; the name behind it stops mattering after parsing.
-VAR_CAP             equ 512             ; cells of variable storage at once
+VAR_CAP             equ 512             ; cells of global storage
 SCOPE_CAP           equ 256             ; bindings visible at once
 SCOPE_DEPTH         equ 32              ; nested blocks
+
+; Where a variable lives. Globals are cells in one flat array and outlive
+; everything; a local is an offset into the frame of the call that is running,
+; so the same offset means a different cell on every recursion.
+VAR_GLOBAL          equ 0
+VAR_LOCAL           equ 1
+
+; Functions, and the managed C stack their locals live on.
+FUNC_CAP            equ 128             ; functions per session
+PARAM_MAX           equ ARG_MAX         ; a call cannot pass more than it takes
+FRAME_CAP           equ 4096            ; cells of local storage, all frames
+CALL_DEPTH          equ 256             ; nested calls, then "too much recursion"
 
 ; String literals. Interned like names and, like names, never released: a
 ; string's address has to outlive the line, because a variable can hold it.
@@ -210,7 +233,11 @@ OP_PRINTF           equ 25              ; 4-byte count, then a 4-byte column
 OP_JMP              equ 26              ; 4-byte target
 OP_JZ               equ 27              ; pops, jumps if it was zero
 OP_JNZ              equ 28              ; pops, jumps if it was not
-OP_COUNT            equ 29
+OP_LOADL            equ 29              ; 4-byte frame offset
+OP_STOREL           equ 30              ; 4-byte frame offset, value stays
+OP_CALL             equ 31              ; 4-byte function id
+OP_RET              equ 32              ; the value is on top of the stack
+OP_COUNT            equ 33
 
 OP_BIN_FIRST        equ OP_MUL          ; mirrors TK_OP_FIRST .. TK_VAL_LAST
 
@@ -224,5 +251,6 @@ LOOP_DEPTH          equ 32              ; nested loops the compiler tracks
 FLOW_NORMAL         equ 0
 FLOW_BREAK          equ 1
 FLOW_CONTINUE       equ 2
+FLOW_RETURN         equ 3
 
 %endif

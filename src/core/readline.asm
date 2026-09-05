@@ -5,9 +5,15 @@
 ;
 ; A block does not fit on a line, so the REPL had to stop being line-oriented.
 ; It still reads one line at a time -- that is what a terminal gives you -- but
-; what it hands the lexer is src_buf, which is however many lines it took to
-; balance the braces. Everything above here works in offsets into that buffer,
+; what it hands the lexer is a submission, which is however many lines it took
+; to balance the braces. Everything above here works in offsets into src_buf,
 ; including the positions the compiler freezes into the bytecode.
+;
+; And src_buf is the whole session, not one submission. Functions arrived at
+; stage 2.3 and they outlive the line that defined them, so a division by zero
+; three functions deep still has to be able to name the column it was written
+; at -- which it cannot do if the text has been overwritten since. Keeping
+; every line costs 64 KiB and makes the answer trivially correct.
 
 %include "tsafoshi.inc"
 
@@ -21,6 +27,11 @@
     global  src_append
     global  src_open_braces
     global  src_line_start
+    global  src_line_end
+    global  src_line_number
+    global  src_text
+    global  src_add
+    global  src_mark
     global  src_buf
 
     extern  sys_read_stdin
@@ -86,54 +97,102 @@ read_line:
 
 ; --- the submission buffer
 
+; Opens a new submission at the end of what is already there, with a newline
+; between it and the last one.
 src_begin:
-    mov     qword [src_len], 0
+    cmp     qword [src_len], 0
+    je      .mark
+    mov     edi, 10
+    call    src_putc
+.mark:
+    mov     rax, [src_len]
+    mov     [src_mark], rax
+    ret
+
+; -> rax = where the current submission starts, which is what the lexer is
+; given. Everything before it is older text nobody is parsing any more.
+src_text:
     lea     rax, [src_buf]
-    mov     byte [rax], 0
+    add     rax, [src_mark]
+    ret
+
+; rdi = text, rsi = length. Appends it to the arena exactly as it is, which is
+; what a file wants: it arrived with its own line breaks and every offset in it
+; has to keep meaning the same column.
+src_add:
+    push    rbx
+    push    r12
+    push    r13
+    mov     rbx, rdi
+    mov     r12, rsi
+    xor     r13, r13
+.next:
+    cmp     r13, r12
+    jae     .done
+    movzx   edi, byte [rbx + r13]
+    call    src_putc
+    test    rax, rax
+    jz      .out
+    inc     r13
+    jmp     .next
+.done:
+    mov     eax, 1
+.out:
+    pop     r13
+    pop     r12
+    pop     rbx
+    ret
+
+; rdi = one byte -> rax = 1, or 0 with the error recorded
+src_putc:
+    mov     rax, [src_len]
+    cmp     rax, SRC_CAP - 2
+    jae     .full
+    lea     rcx, [src_buf]
+    mov     [rcx + rax], dil
+    inc     rax
+    mov     [src_len], rax
+    mov     byte [rcx + rax], 0
+    mov     eax, 1
+    ret
+.full:
+    lea     rdi, [src_buf]
+    add     rdi, rax
+    call    err_srcfull
+    xor     eax, eax
     ret
 
 ; Appends whatever read_line just left in line_buf, with a newline in front of
-; it if there is already something there.
+; it if this submission already has a line.
 ;
 ; A separator rather than a terminator, and the difference matters: an error
 ; reported at the very end of the input would otherwise be measured from the
 ; start of an empty line that follows it, and the caret would jump back to
-; column zero. The submission ends where the last character does.
+; column zero. A submission ends where its last character does.
 src_append:
     push    rbx
     push    r12
-    lea     rbx, [src_buf]
-    mov     r12, [src_len]
-    test    r12, r12
-    jz      .copy_setup
-    cmp     r12, SRC_CAP - 2
-    jae     .full
-    mov     byte [rbx + r12], 10
-    inc     r12
+    mov     rax, [src_len]
+    cmp     rax, [src_mark]
+    jbe     .copy_setup
+    mov     edi, 10
+    call    src_putc
+    test    rax, rax
+    jz      .out
 .copy_setup:
-    lea     rcx, [line_buf]
-    xor     edx, edx
+    lea     rbx, [line_buf]
+    xor     r12, r12
 .copy:
-    movzx   eax, byte [rcx + rdx]
-    test    al, al
+    movzx   edi, byte [rbx + r12]
+    test    dil, dil
     jz      .done
-    cmp     r12, SRC_CAP - 2
-    jae     .full
-    mov     [rbx + r12], al
+    call    src_putc
+    test    rax, rax
+    jz      .out
     inc     r12
-    inc     rdx
     jmp     .copy
 .done:
-    mov     byte [rbx + r12], 0
-    mov     [src_len], r12
     mov     eax, 1
-    jmp     .out
-.full:
-    mov     byte [rbx + r12], 0
-    mov     [src_len], r12
-    lea     rdi, [src_buf]
-    call    err_srcfull
-    xor     eax, eax
 .out:
     pop     r12
     pop     rbx
@@ -150,7 +209,7 @@ src_open_braces:
     push    rbx
     lea     rbx, [src_buf]
     xor     eax, eax                    ; the depth
-    xor     ecx, ecx                    ; the offset
+    mov     rcx, [src_mark]             ; only this submission's own braces
 .scan:
     movzx   edx, byte [rbx + rcx]
     test    dl, dl
@@ -247,6 +306,39 @@ src_line_start:
     dec     rax
     jmp     .back
 .start:
+    ret
+
+; rdi = a position -> rax = one past the last character of its line
+src_line_end:
+    mov     rax, rdi
+.scan:
+    movzx   ecx, byte [rax]
+    test    cl, cl
+    jz      .done
+    cmp     cl, 10
+    je      .done
+    inc     rax
+    jmp     .scan
+.done:
+    ret
+
+; rdi = a position -> rax = which line of the current submission it is on,
+; counting from one. Only the submission, not the session: a file is one
+; submission, so this is the line number the user's editor would show.
+src_line_number:
+    lea     rcx, [src_buf]
+    add     rcx, [src_mark]
+    mov     eax, 1
+.scan:
+    cmp     rcx, rdi
+    jae     .done
+    cmp     byte [rcx], 10
+    jne     .step
+    inc     rax
+.step:
+    inc     rcx
+    jmp     .scan
+.done:
     ret
 
 line_is_blank:
@@ -351,6 +443,8 @@ rd_pos:
 rd_len:
     resq    1
 src_len:
+    resq    1
+src_mark:
     resq    1
 line_buf:
     resb    LINE_CAP

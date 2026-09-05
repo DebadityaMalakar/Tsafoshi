@@ -6,21 +6,44 @@ A **C99** interpreter written in x86-64 assembly. No compiler backend, no code
 generation, no ABI to fight — C source goes in, behaviour comes out. The host
 is hand-written assembly the whole way down.
 
-This is stage 2.2. It compiles to bytecode, runs it on a virtual machine, and
-has variables, `printf`, and now real control flow: `if`, `while`, `for`,
-`do`, blocks and lexical scope.
+This is stage 2.3. It compiles to bytecode, runs it on a virtual machine, and
+has variables, control flow, lexical scope, and now functions with a real call
+stack — so it will run a C file, starting at `main`, and exit with what `main`
+returned.
+
+```sh
+$ cat examples/gcd.c
+#include <stdio.h>
+
+int gcd(int a, int b)
+{
+    while (b != 0) {
+        int t = b;
+        b = a % b;
+        a = t;
+    }
+    return a;
+}
+
+int main(void)
+{
+    printf("gcd(1071, 462) = %d\n", gcd(1071, 462));
+    return 0;
+}
+
+$ ./run.sh --build && ./build/tsafoshi examples/gcd.c
+gcd(1071, 462) = 21
+```
+
+Or interactively:
 
 ```
-tsafoshi> int total = 0;
-tsafoshi> for (int i = 1; i <= 10; i = i + 1) {
-     ...>     if (i % 3 == 0) continue;
-     ...>     total = total + i;
+tsafoshi> int fib(int n) {
+     ...>     if (n < 2) return n;
+     ...>     return fib(n - 1) + fib(n - 2);
      ...> }
-tsafoshi> total
-= 37
-tsafoshi> printf("total is %d\n", total)
-total is 37
-= 12
+tsafoshi> fib(20)
+= 6765
 ```
 
 BODMAS by default, and the order is switchable — see [Order of
@@ -77,8 +100,11 @@ assistance, not as reviewed, production-grade work.
 | **1.5** | Bytecode: compile the tree, then run it in a dispatch loop, plus a disassembler | **done** |
 | **2.1** | Variables, assignment, statements, `printf` | **done** |
 | **2.2** | `if` / `while` / `for` / `do`, jumps, blocks and scope | **done** |
-| 2.3 | The VM call stack, and user-defined functions | next |
-| 3 | Functions, pointers, arrays, `struct` | |
+| **2.3** | The VM call stack, user-defined functions, running a `.c` file | **done** |
+| 3.1 | A proper command line: flags, `argv`, exit status, a REPL that knows it is one | next |
+| 3.2 | Types: `char`, `int`, `long`, `_Bool`, `sizeof`, conversions, typed opcodes | |
+| 3.3 | Pointers and arrays: `&`, `*`, subscripting, pointer arithmetic, real strings | |
+| 3.4 | `struct` and `union`, member access, passing and returning them | |
 | 4 | Native call bridge — real libc behind the builtins | |
 | 5 | Preprocessor: `#include` (standard headers ignored, user `.c` files included once), `#define`, `#if`, `__VA_ARGS__` | |
 | 6 | The rest of C99 — VLAs, designated initializers, compound literals | |
@@ -98,6 +124,7 @@ What choosing C99 specifically commits us to, beyond C89:
 |---|---|
 | `//` comments | lexer, **done** at stage 2.2 |
 | Declarations anywhere in a block, and in `for` init | parser + scoping, **done** at stage 2.2 |
+| `int main(void)` as the entry point of a file | **done** at stage 2.3 |
 | `long long`, `_Bool`, `<stdbool.h>`, `<stdint.h>` | type system, stage 3 |
 | Designated initializers, compound literals | stage 6 |
 | Flexible array members | stage 6 |
@@ -410,6 +437,187 @@ the start of the line the error is on and adding the prompt width, so it lands
 correctly on the fourth line of a block for the same reason it does on the
 first.
 
+## Functions
+
+`int name(params) { body }`, defined at the top level, with `int` parameters
+and an `int` result — which is every function there is until types arrive:
+
+```
+tsafoshi> int gcd(int a, int b) { while (b != 0) { int t = b; b = a % b; a = t; } return a; }
+tsafoshi> gcd(1071, 462)
+= 21
+```
+
+`return` with no expression, and falling off the end of a function, both mean
+`return 0` — which is what C99 already says about `main`, generalised because
+there is only one return type so far to generalise over.
+
+A function is registered **before its body is parsed**. That is not tidiness;
+it is the whole of what makes recursion possible, because the call inside the
+body has to resolve to something, and the something is a record whose entry
+point is not yet known:
+
+```
+tsafoshi> int fact(int n) { if (n <= 1) return 1; return n * fact(n - 1); }
+tsafoshi> fact(12)
+= 479001600
+```
+
+Arity is checked where the call is written, not discovered when the frame turns
+out to be the wrong shape:
+
+```
+tsafoshi> gcd(4)
+          ^
+error: wrong number of arguments
+```
+
+Redefinition is refused rather than allowed to win. At a prompt it is tempting
+to let the second definition replace the first, but calls already compiled
+against the first would still be pointing at it, and "the function I just fixed
+did not change" is a worse experience than being told to pick another name.
+
+Mutual recursion needs a way to declare a function without defining it, which
+is a prototype, which needs a type system. That is stage 3.
+
+## The call stack
+
+A local is not a variable with a different name — it is an **offset into the
+frame of the call that is running**. That is what makes recursion work at all:
+the same offset is a different cell on every call.
+
+```
+tsafoshi> :dis
+tsafoshi> int sq(int n) { return n * n; }
+function sq:
+    0000  loadl  fp+0
+    0005  loadl  fp+0
+    0010  mul
+    0011  ret
+    0012  push   0
+    0021  ret
+    0022  push   0
+    0031  halt
+```
+
+`loadl` and `storel` are frame-relative where `load` and `store` are absolute,
+and the node knew which to use because `scope.asm` knew, back when a scope
+still existed. The `push 0; ret` at `0012` is the fall-off-the-end case,
+reached only by a body that did not return for itself.
+
+The `push 0; halt` at `0022` is a second listing, not part of the function: it
+is what the *line* compiled to. A definition does nothing when it runs — its
+whole effect happened while it was being read — so the line is empty, and an
+empty line still has to answer with something.
+
+There is no argument-passing convention to speak of, and that is the useful
+part. Parameters are declared into the function's scope **first**, so they land
+at frame offsets 0, 1, 2… The caller pushes its arguments onto the operand
+stack in order, where they end up contiguous; `call` moves that block into the
+bottom of the new frame. One copy, and an agreement about declaration order.
+
+```
+tsafoshi> int add(int a, int b) { return a + b; }
+tsafoshi> add(3, 4)
+    0022  push   3
+    0031  push   4
+    0040  call   add
+    0045  halt
+= 7
+```
+
+`call` reads the frame size out of the function table at run time rather than
+carrying it in the instruction. That is deliberate groundwork: at stage 6 a
+frame containing a variable-length array will not have a size known when the
+call was compiled, and this is already the shape that copes.
+
+Both engines share the frame storage itself — the same cells, indexed the same
+way — while disagreeing completely about how a call is made. The VM keeps a
+frame pointer and its own stack of return records. The tree walker recurses on
+the machine stack and treats a C return as one more kind of unwinding, beside
+`break` and `continue`. Sharing the cells is what makes the disagreement
+detectable: if they differ about a call, it shows up as a wrong answer rather
+than as two private truths.
+
+Recursion is bounded, and says so rather than taking the process down with it:
+
+```
+tsafoshi> int inf(int n) { return inf(n + 1); }
+tsafoshi> inf(1)
+          ^
+error: too much recursion
+```
+
+## Running a file
+
+```sh
+$ tsafoshi examples/fizzbuzz.c
+```
+
+The whole file is one submission — which works only because a submission
+stopped being a line at stage 2.2 — and then `main` is called, by a node built
+by hand and handed to the same `exec_run` the prompt uses. So a file is run by
+exactly the route anything else is run by, on either engine.
+
+`main`'s return value is the process's exit status:
+
+```sh
+$ cat > answer.c <<'END'
+int main(void) { return 42; }
+END
+$ tsafoshi answer.c; echo $?
+42
+```
+
+Errors carry a line number and print the line, because there is no prompt to
+have echoed it:
+
+```
+$ tsafoshi broken.c
+5 |     return n / 0;
+                 ^
+error: division by zero
+```
+
+Both presentations are the same fact — a column measured from the start of the
+line the error is on. At a prompt the terminal already printed that line, so
+the caret only has to clear the prompt; reading a file, nothing did, so the
+line is printed first.
+
+There is exactly one argument for now, and it is a path. Flags, `argv` reaching
+`main`, and a REPL that knows whether it is talking to a terminal are stage
+3.1.
+
+### `#include`, and where `main` goes
+
+**The standard library is already there**, so `#include <stdio.h>` has nothing
+left to do — there is no separate translation unit to declare `printf` into and
+no linker to resolve it afterwards. But real C source has that line at the top
+and has to keep working, so it is **accepted and ignored**:
+
+```c
+#include <stdio.h>
+
+int main(void)
+{
+    printf("hello from the north star\n");
+    return 0;
+}
+```
+
+runs byte-for-byte as written, with the first line doing nothing at all.
+
+The line is blanked out with spaces rather than deleted, so every byte after it
+keeps the offset it had in the file and a caret still lands under the right
+column. This is not the preprocessor — that is stage 5, and it is where
+`#define`, `#if` and including your own `.c` files arrive. It is one directive
+handled by not tripping over it.
+
+`main(int argc, char **argv)` needs pointers, so for now only `int main(void)`
+is accepted and the other form is refused rather than silently mistaken for it.
+
+See [`examples/`](examples/) for programs that run today.
+
 ## Comments
 
 `/* ... */` and, because this is C99 and not C89, `//` to end of line. Both are
@@ -467,6 +675,9 @@ where one is needed:
 | `printf` | 4-byte count, then a 4-byte column | consume that many arguments, push the byte count |
 | `jmp` | 4-byte target | go there |
 | `jz` `jnz` | 4-byte target | pop one cell, go there if it was / was not zero |
+| `loadl` `storel` | 4-byte frame offset | read or write a local, relative to the frame pointer |
+| `call` | 4-byte function | enter a frame, move the arguments into it, jump |
+| `ret` | | leave the frame; the value on top of the stack is the answer |
 
 The sixteen binary opcodes are numbered in token order, so the compiler turns
 an operator token into its opcode with a subtract and an add rather than a
@@ -482,9 +693,16 @@ statement ends in a `pop`, why a declaration does, why a list of statements
 needs no cleanup at the end, and why the operand stack is never checked for
 underflow at run time.
 
-The listing distinguishes three kinds of number, because they live in three
+The listing distinguishes four kinds of number, because they live in four
 different spaces: `@n` is a column in the source, `+n` an offset into the
-string arena, and `->n` an offset into the listing itself.
+string arena, `->n` an offset into the listing itself, and `fp+n` an offset
+into the frame of whichever call is running.
+
+The buffer holds every function the session has defined, in definition order,
+with the current line's code sitting on top of them and being overwritten by
+the next line. Nothing is ever moved, which is what lets an entry point be a
+plain offset that stays valid for the session — and it is why `:dis` lists a
+range rather than the whole thing.
 
 `div`, `mod` and `printf` are the only operations that can fail, and by the
 time the VM is running there is no tree left to ask where they came from — so
@@ -596,6 +814,7 @@ src/
   core/                 platform-independent, assembled once
     tsafoshi.inc        shared constants and token kinds
     repl.asm            the read-eval-print loop
+    script.asm          running a .c file, and reaching its main
     readline.asm        buffered line input, and the multi-line submission
     lexer.asm           source text -> tokens, comments and all
     names.asm           identifier interning: text -> a stable slot
@@ -604,19 +823,22 @@ src/
     parser.asm          tokens -> a syntax tree (structure only)
     ast.asm             node storage: one arena, reset per line
     eval.asm            tree -> value directly (the oracle engine)
+    func.asm            the function table: arity, frame size, entry, body
     compile.asm         tree -> bytecode
     code.asm            the code buffer, reset per line
     vm.asm              the dispatch loop and its operand stack
     disasm.asm          bytecode -> a listing
     exec.asm            which engine runs, and the commands that switch it
     op.asm              operator semantics (values)
-    vars.asm            variable storage, and the ":vars" command
+    vars.asm            global storage, the managed C stack, and ":vars"
     printf.asm          the format-string interpreter
     mode.asm            evaluation order, and the ":mode" command
     error.asm           diagnostics and the caret
     format.asm          number formatting, output helpers
-  linux/input.asm       I/O primitives, Linux syscalls
-  windows/input.asm     I/O primitives, Windows kernel32
+  linux/input.asm       console I/O, Linux syscalls
+  linux/readfile.asm    files and argv, Linux syscalls
+  windows/input.asm     console I/O, Windows kernel32
+  windows/readfile.asm  files and argv, Windows kernel32
 tools/prettier.py       source layout normalizer
 ```
 
@@ -630,7 +852,7 @@ linked. Cross-module symbols are explicit `global` / `extern`, so the
 dependency graph is visible at the top of every file.
 
 The build is `src/main.asm` plus `src/core/*.asm` plus exactly one
-`src/<platform>/input.asm`. The core never names a platform.
+`src/<platform>/`. The core never names a platform.
 
 ### The module seams
 
@@ -643,7 +865,10 @@ The build is `src/main.asm` plus `src/core/*.asm` plus exactly one
 | parser → scope | `scope_declare(name)` and `scope_lookup(name)` — an identifier goes in, a storage slot comes out, once |
 | tree → engine | `exec_run(statements, value)`, which is either `eval_program` or `code_compile` then `vm_run` |
 | engine → op | `op_apply(lhs, rhs, kind, pos)` and the `op_*` routines — the engine decides order, `op.asm` produces every value |
-| engine → vars | `var_get(slot)` / `var_set(slot, value)` — slots only, never text |
+| engine → vars | `var_get(slot)` / `var_set(slot, value)` for globals, `var_local_get` / `var_local_set` for a frame — slots only, never text |
+| engine → vars | `frame_enter(size)` / `frame_args(from, n)` / `frame_leave(fp)` — the managed C stack, shared by both engines |
+| parser → func | `func_declare(name, arity)` before the body, `func_set_body` / `func_set_frame` after it |
+| engine → func | `func_arity` / `func_frame` / `func_entry` for the VM, `func_body` for the walker |
 | engine → printf | `printf_run(args, count, pos)` — one array of cells, whichever engine built it |
 | compiler → code | `code_op` / `code_i64` / `code_u32` to write, and `code_jump` / `code_patch` for a jump whose target is not known yet |
 | compiler → vm | the code buffer in `code.asm`; neither module owns the memory, so `disasm.asm` reads it without either knowing |
@@ -686,8 +911,8 @@ a limit you can hit today.
 
 ### The platform contract
 
-Any new `input.asm` provides exactly four routines. The entry point is not one
-of them — `src/main.asm` is shared:
+A target provides eight routines across two files, and the entry point is not
+one of them — `src/main.asm` is shared. `input.asm` is the console:
 
 | | |
 |---|---|
@@ -695,6 +920,24 @@ of them — `src/main.asm` is shared:
 | `sys_write_stderr` | `rsi` = buffer, `rdx` = length |
 | `sys_read_stdin` | `rsi` = buffer, `rdx` = capacity → `rax` = bytes, `<= 0` at EOF |
 | `sys_exit` | `edi` = status, does not return |
+
+and `readfile.asm` is files and the command line:
+
+| | |
+|---|---|
+| `sys_args_init` | `rdi` = the stack as the loader left it, called once, first |
+| `sys_argv` | `rdi` = index → `rax` = that argument, or 0 |
+| `sys_open_read` | `rdi` = path → `rax` = a file, negative if it could not be opened |
+| `sys_read_file` | `rdi` = file, `rsi` = buffer, `rdx` = capacity → `rax` = bytes, 0 at the end |
+| `sys_close` | `rdi` = file |
+
+Two files rather than one because they are two jobs, and because the split is
+where the platforms genuinely diverge rather than merely differ in spelling: a
+Linux file is an integer read by the same call that reads a pipe, and a Windows
+file is an opaque handle from `CreateFileA`. Likewise the command line, which
+Linux leaves on the initial stack and Windows makes you ask for and split
+yourself. `src/main.asm` hands `rsp` to `sys_args_init` without knowing which
+of those is true, and each target decides whether that was useful.
 
 They may clobber the caller-saved registers freely. `rbx` and `r12`–`r15` must
 survive — the core keeps live state there across every call.
@@ -737,8 +980,8 @@ The run scripts invoke it before every build, so formatting never drifts.
 ## Porting
 
 ARM64 and 32-bit x86 are not here and are not planned. The design makes them
-straightforward forks: reimplement the four `sys_*` routines, keep the register
-contract, and `src/core/` is untouched.
+straightforward forks: reimplement the eight `sys_*` routines, keep the
+register contract, and `src/core/` is untouched.
 
 ## Design notes
 

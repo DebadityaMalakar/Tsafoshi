@@ -43,7 +43,7 @@ if defined PY "!PY!" "%ROOT%tools\prettier.py" -q "%ROOT%src"
 if not exist "%OUT%" mkdir "%OUT%"
 
 set "OBJS="
-for %%F in ("%ROOT%src\main.asm" "%CORE%\*.asm" "%ROOT%src\windows\input.asm") do (
+for %%F in ("%ROOT%src\main.asm" "%CORE%\*.asm" "%ROOT%src\windows\*.asm") do (
     nasm -f win64 -g -I"%CORE%" "%%~fF" -o "%OUT%\%%~nF.obj"
     if errorlevel 1 exit /b 1
     set "OBJS=!OBJS! "%OUT%\%%~nF.obj""

@@ -10,11 +10,11 @@
 
 %include "tsafoshi.inc"
 
-    global  disasm_all
+    global  disasm_range
 
     extern  code_buf
-    extern  code_len
     extern  fmt_i64
+    extern  func_name
     extern  name_text
     extern  scope_name_of
     extern  sys_write_stdout
@@ -24,15 +24,22 @@ OFF_DIGITS          equ 4
 
     section .text
 
-; rbx = offset into the stream, r12 = the opcode, r13 = its operand shape
-disasm_all:
+; rdi = where to start, rsi = where to stop. The arena holds every function the
+; session has defined as well as the current line, so a listing is always of a
+; range rather than of the whole thing.
+;
+; rbx = offset into the stream, r12 = the opcode, r13 = its operand shape,
+; r14 = where to stop
+disasm_range:
     push    rbx
     push    r12
     push    r13
-    xor     ebx, ebx
+    push    r14
+    mov     rbx, rdi
+    mov     r14, rsi
 
 .next:
-    cmp     rbx, [code_len]
+    cmp     rbx, r14
     jae     .done
 
     mov     rdi, rbx
@@ -114,6 +121,7 @@ disasm_all:
     call    take_u32
     push    rax
     mov     rdi, rax
+    xor     esi, esi                    ; a global; a local has no name left
     call    scope_name_of
     pop     rcx
     cmp     rax, -1
@@ -133,6 +141,27 @@ disasm_all:
     call    sys_write_stdout
     jmp     .endline
 
+; A frame offset is not a name and never was one -- the same offset is a
+; different cell on every call -- so it is printed as what it is.
+.frame:
+    lea     rsi, [t_bracket]
+    mov     rdx, t_bracket.len
+    call    sys_write_stdout
+    call    take_u32
+    call    fmt_i64
+    call    sys_write_stdout
+    jmp     .endline
+
+.callee:
+    call    take_u32
+    mov     rdi, rax
+    call    func_name
+    mov     rdi, rax
+    call    name_text
+    mov     rsi, rax
+    call    sys_write_stdout
+    jmp     .endline
+
 .count:
     call    take_u32
     call    fmt_i64
@@ -143,6 +172,7 @@ disasm_all:
     jmp     .column
 
 .done:
+    pop     r14
     pop     r13
     pop     r12
     pop     rbx
@@ -221,6 +251,10 @@ mnemonics:
     db      "jmp    "                   ; OP_JMP
     db      "jz     "                   ; OP_JZ
     db      "jnz    "                   ; OP_JNZ
+    db      "loadl  "                   ; OP_LOADL
+    db      "storel "                   ; OP_STOREL
+    db      "call   "                   ; OP_CALL
+    db      "ret    "                   ; OP_RET
 
 ; opcode -> what follows it, as an index into operand_table
 operands:
@@ -239,16 +273,21 @@ operands:
     db      4                           ; OP_STR      arena offset
     db      5                           ; OP_PRINTF   count, then a column
     db      6, 6, 6                     ; OP_JMP OP_JZ OP_JNZ  a target
+    db      7, 7                        ; OP_LOADL OP_STOREL   frame offset
+    db      8                           ; OP_CALL     a function
+    db      0                           ; OP_RET
 
     align   8
 operand_table:
-    dq      disasm_all.endline
-    dq      disasm_all.immediate
-    dq      disasm_all.column
-    dq      disasm_all.slot
-    dq      disasm_all.offset
-    dq      disasm_all.count
-    dq      disasm_all.target
+    dq      disasm_range.endline
+    dq      disasm_range.immediate
+    dq      disasm_range.column
+    dq      disasm_range.slot
+    dq      disasm_range.offset
+    dq      disasm_range.count
+    dq      disasm_range.target
+    dq      disasm_range.frame
+    dq      disasm_range.callee
 
 t_indent:
     db      "    "
@@ -262,6 +301,9 @@ t_plus:
     db      "+"
 t_dollar:
     db      "$"
+t_bracket:
+    db      "fp+"
+.len                equ $ - t_bracket
 t_arrow:
     db      "->"
 .len                equ $ - t_arrow

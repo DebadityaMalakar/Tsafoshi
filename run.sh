@@ -50,7 +50,7 @@ done
 
 mkdir -p "$OUT"
 OBJS=""
-for src in "$ROOT/src/main.asm" "$CORE"/*.asm "$ROOT/src/linux/input.asm"; do
+for src in "$ROOT/src/main.asm" "$CORE"/*.asm "$ROOT/src/linux"/*.asm; do
     obj="$OUT/$(basename "$src" .asm).o"
     nasm -f elf64 -g -F dwarf -I "$CORE" "$src" -o "$obj"
     OBJS="$OBJS $obj"

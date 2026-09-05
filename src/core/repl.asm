@@ -32,9 +32,12 @@
     extern  src_begin
     extern  src_append
     extern  src_open_braces
-    extern  src_buf
+    extern  src_text
     extern  names_init
     extern  scope_init
+    extern  func_init
+    extern  ast_init
+    extern  code_init
     extern  scope_unwind
     extern  lex_init
     extern  tok_kind
@@ -44,20 +47,42 @@
     extern  parse_silent
     extern  parse_value
     extern  exec_run
+    extern  exec_define
     extern  print_result
     extern  err_code
     extern  err_reset
     extern  err_report
     extern  err_trailing
+    extern  sys_argv
+    extern  script_run
     extern  sys_write_stdout
     extern  sys_write_stderr
     extern  sys_exit
 
     section .text
 
+; Every session, interactive or not, starts the same way. What differs is only
+; where the source comes from after that.
 repl_main:
     call    names_init
     call    scope_init
+    call    func_init
+    call    ast_init
+    call    code_init
+
+; One argument means a file to run, and the process exits with whatever main
+; returned. Anything more elaborate than that is stage 3's command line.
+    mov     edi, 1
+    call    sys_argv
+    test    rax, rax
+    jz      .interactive
+    mov     rdi, rax
+    call    script_run
+    mov     edi, eax
+    call    sys_exit
+    hlt
+
+.interactive:
     lea     rsi, [msg_banner]
     mov     rdx, msg_banner.len
     call    sys_write_stdout
@@ -101,7 +126,8 @@ repl_main:
 
 .ready:
     call    ast_reset
-    lea     rdi, [src_buf]
+    call    src_text
+    mov     rdi, rax
     call    lex_init
     call    parse_line
     cmp     qword [err_code], 0
@@ -109,6 +135,12 @@ repl_main:
 
     cmp     qword [tok_kind], TK_EOF    ; the whole submission must be consumed
     jne     .trailing
+
+    push    rax
+    call    exec_define                 ; keep whatever functions were defined
+    pop     rax
+    cmp     qword [err_code], 0
+    jne     .error
 
     mov     rdi, rax                    ; the statements, then the value
     mov     rsi, [parse_value]
@@ -181,9 +213,9 @@ w_help:
     db      "help", 0
 
 msg_banner:
-    db      "Tsafoshi 0.5 -- stage 2.2: if, while, for, blocks and scope", 10
+    db      "Tsafoshi 0.6 -- stage 2.3: functions and the call stack", 10
     db      "commands start with a colon; ':help' lists them, ':quit' leaves", 10
-    db      "everything else is C: int n = 5; while (n > 0) n = n - 1;", 10, 10
+    db      "everything else is C: int sq(int n) { return n * n; } sq(7)", 10, 10
 .len                equ $ - msg_banner
 msg_prompt:
     db      "tsafoshi> "

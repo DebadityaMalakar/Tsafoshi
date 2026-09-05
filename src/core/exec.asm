@@ -9,12 +9,22 @@
 %include "tsafoshi.inc"
 
     global  exec_run
+    global  exec_define
     global  exec_command
 
     extern  eval_program
     extern  code_compile
+    extern  code_compile_function
+    extern  ast_commit
+    extern  parse_defined
+    extern  parse_defined_count
+    extern  disasm_range
     extern  vm_run
-    extern  disasm_all
+    extern  func_name
+    extern  func_entry
+    extern  name_text
+    extern  code_base
+    extern  code_len
     extern  err_code
     extern  match_word
     extern  skip_blanks
@@ -25,6 +35,66 @@ W_ENGINE_LEN        equ 6               ; length of the word "engine"
 
     section .text
 
+; Compiles and keeps whatever functions the submission just defined, and makes
+; their bodies permanent in the tree arena.
+;
+; This happens whichever engine is running, and that is deliberate. The tree
+; walker needs the body kept; the VM needs it compiled; and the engine can be
+; switched at any prompt, so a function that was only half-defined because of
+; which engine happened to be active would be a trap. Definition is a fact
+; about the session, not about an engine.
+;
+; rbx = which definition
+exec_define:
+    cmp     qword [parse_defined_count], 0
+    je      .none
+    push    rbx
+    xor     ebx, ebx
+.next:
+    cmp     rbx, [parse_defined_count]
+    jae     .done
+    lea     rcx, [parse_defined]
+    mov     rdi, [rcx + rbx * CELL]
+    push    rdi
+    call    code_compile_function
+    pop     rdi
+    cmp     qword [dis_listing], 0
+    je      .quiet
+    call    disasm_function
+.quiet:
+    inc     rbx
+    jmp     .next
+.done:
+    pop     rbx
+    call    ast_commit
+.none:
+    ret
+
+; rdi = function id. Lists the code just compiled for it, which is the range
+; between where it starts and where the arena now ends.
+disasm_function:
+    push    rbx
+    mov     rbx, rdi
+    lea     rsi, [m_function]
+    mov     rdx, m_function.len
+    call    sys_write_stdout
+    mov     rdi, rbx
+    call    func_name
+    mov     rdi, rax
+    call    name_text
+    mov     rsi, rax
+    call    sys_write_stdout
+    lea     rsi, [m_colon]
+    mov     rdx, m_colon.len
+    call    sys_write_stdout
+    mov     rdi, rbx
+    call    func_entry
+    mov     rdi, rax
+    mov     rsi, [code_base]
+    call    disasm_range
+    pop     rbx
+    ret
+
 ; rdi = the statement list, rsi = the trailing expression or zero -> rax.
 ;
 ; Both engines take the same pair, because the split is the language's and not
@@ -34,12 +104,17 @@ exec_run:
     cmp     qword [engine_bytecode], 0
     je      eval_program
 
-    call    code_compile
+    call    code_compile                ; rax = where the line's code starts
     cmp     qword [err_code], 0
     jne     .zero
+    push    rax
     cmp     qword [dis_listing], 0
-    je      vm_run
-    call    disasm_all
+    je      .quiet
+    mov     rdi, rax
+    mov     rsi, [code_len]
+    call    disasm_range
+.quiet:
+    pop     rdi
     jmp     vm_run
 .zero:
     xor     eax, eax
@@ -149,6 +224,12 @@ m_off:
 .len                equ $ - m_off
 m_newline:
     db      10
+m_function:
+    db      "function "
+.len                equ $ - m_function
+m_colon:
+    db      ":", 10
+.len                equ $ - m_colon
 m_unknown:
     db      "error: unknown engine; try tree or bytecode", 10
 .len                equ $ - m_unknown

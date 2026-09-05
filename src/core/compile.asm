@@ -13,6 +13,11 @@
 ; the end -- follows from those two, and the operand stack is never checked at
 ; run time because of them.
 ;
+; A function is compiled into the same buffer and then kept, by raising the
+; arena's watermark past it. Everything the session has defined therefore sits
+; below the current line's code, in definition order, never moving -- which is
+; what lets an entry point be a plain offset that stays valid for good.
+;
 ; Control flow is where a tree stops being convenient and jumps have to be
 ; invented. Two things make that manageable. A forward jump is emitted with a
 ; hole where its target goes, and the hole is filled in once the target is
@@ -23,8 +28,12 @@
 %include "tsafoshi.inc"
 
     global  code_compile
+    global  code_compile_function
 
     extern  code_reset
+    extern  code_commit
+    extern  func_frame
+    extern  func_set_entry
     extern  code_op
     extern  code_i64
     extern  code_u32
@@ -33,6 +42,7 @@
     extern  code_patch
     extern  code_buf
     extern  src_buf
+    extern  func_body
     extern  err_code
     extern  err_toodeep
 
@@ -44,11 +54,44 @@
 ;
 ; HALT reads the top of the stack, so there has to be something there: a line
 ; that was all statements still answers, and its answer is zero.
+; rdi = function id. Compiles its body into the arena and keeps it, recording
+; where it starts. Called once per definition, whichever engine is active: the
+; user may switch to the VM later, and a function with no code is not something
+; to discover at that point.
+;
+; Falling off the end of a function is "return 0", exactly as C99 says of main
+; -- so the body is always followed by one, and a body that already returned
+; simply never reaches it.
+code_compile_function:
+    push    rbx
+    mov     rbx, rdi
+    call    code_reset
+    mov     qword [loop_top], 0
+    mov     rdi, rbx
+    mov     rsi, rax
+    call    func_set_entry
+    mov     rdi, rbx
+    call    func_body
+    mov     rdi, rax
+    call    emit_node
+    mov     edi, OP_PUSH
+    call    code_op
+    xor     edi, edi
+    call    code_i64
+    mov     edi, OP_RET
+    call    code_op
+    call    code_commit
+    pop     rbx
+    ret
+
+; -> rax = where the program starts, for vm_run
 code_compile:
     push    rbx
+    push    r12
     mov     rbx, rsi
     push    rdi
     call    code_reset
+    mov     r12, rax
     mov     qword [loop_top], 0
     pop     rdi
     call    emit_node
@@ -65,6 +108,8 @@ code_compile:
 .halt:
     mov     edi, OP_HALT
     call    code_op
+    mov     rax, r12
+    pop     r12
     pop     rbx
     ret
 
@@ -93,8 +138,16 @@ emit_node:
     call    code_u32
     jmp     .out
 
+;
+; A global is an index into one array that outlives everything; a local is an
+; offset from the frame of the call that is running. Same slot number, two
+; different opcodes, and the node said which back when a scope still existed.
 .var:
     mov     edi, OP_LOAD
+    cmp     qword [rbx + NODE_RHS], VAR_LOCAL
+    jne     .var_emit
+    mov     edi, OP_LOADL
+.var_emit:
     call    code_op
     mov     rdi, [rbx + NODE_VAL]
     call    code_u32
@@ -104,10 +157,7 @@ emit_node:
 .assign:
     mov     rdi, [rbx + NODE_LHS]
     call    emit_node
-    mov     edi, OP_STORE
-    call    code_op
-    mov     rdi, [rbx + NODE_VAL]
-    call    code_u32
+    call    emit_store
     jmp     .out
 
 .unary:
@@ -251,10 +301,7 @@ emit_node:
 .decl_init:
     call    emit_node
 .decl_store:
-    mov     edi, OP_STORE
-    call    code_op
-    mov     rdi, [rbx + NODE_VAL]
-    call    code_u32
+    call    emit_store
     mov     edi, OP_POP
     call    code_op
     jmp     .out
@@ -401,6 +448,48 @@ emit_node:
     call    code_patch
     jmp     .out
 
+; "return" with no expression still leaves a value, because RET expects one and
+; because every function is an int function until stage 3 says otherwise.
+.return:
+    mov     rdi, [rbx + NODE_LHS]
+    test    rdi, rdi
+    jnz     .return_value
+    mov     edi, OP_PUSH
+    call    code_op
+    xor     edi, edi
+    call    code_i64
+    jmp     .return_emit
+.return_value:
+    call    emit_node
+.return_emit:
+    mov     edi, OP_RET
+    call    code_op
+    jmp     .out
+
+; A call. The arguments are pushed in order and left there; CALL takes them off
+; into the new frame, which is why the parameters were declared first and so
+; occupy offsets 0, 1, 2 ... There is no argument-passing convention to speak
+; of, only an agreement about where a frame starts.
+;
+; r12 = the chain
+.icall:
+    push    r12
+    mov     r12, [rbx + NODE_LHS]
+.icall_arg:
+    test    r12, r12
+    jz      .icall_go
+    mov     rdi, [r12 + NODE_LHS]
+    call    emit_node
+    mov     r12, [r12 + NODE_RHS]
+    jmp     .icall_arg
+.icall_go:
+    pop     r12
+    mov     edi, OP_CALL
+    call    code_op
+    mov     rdi, [rbx + NODE_VAL]
+    call    code_u32
+    jmp     .out
+
 ; The arguments end up contiguous on the operand stack in the order they were
 ; written, which is exactly the array printf_run reads.  r12 = the chain
 .call:
@@ -428,6 +517,18 @@ emit_node:
     pop     rbx
 .nothing:
     ret
+
+; rbx = a node whose VAL is a slot and whose RHS says which storage it is
+emit_store:
+    mov     edi, OP_STORE
+    cmp     qword [rbx + NODE_RHS], VAR_LOCAL
+    jne     .emit
+    mov     edi, OP_STOREL
+.emit:
+    call    code_op
+    mov     rdi, [rbx + NODE_VAL]
+    jmp     code_u32
+
 
 ; ---------------------------------------------------------------------------
 ; The loop stack. One entry per loop being compiled, holding the head of each
@@ -528,6 +629,8 @@ emit_table:
     dq      emit_node.break             ; NT_BREAK
     dq      emit_node.continue          ; NT_CONTINUE
     dq      emit_node.out               ; NT_EMPTY
+    dq      emit_node.return            ; NT_RETURN
+    dq      emit_node.icall             ; NT_INVOKE
 
 ; ---------------------------------------------------------------------------
     section .bss

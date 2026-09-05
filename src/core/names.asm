@@ -164,6 +164,12 @@ k_continue:
 k_int:
     db      "int"
 .len                equ $ - k_int
+k_return:
+    db      "return"
+.len                equ $ - k_return
+k_void:
+    db      "void"
+.len                equ $ - k_void
 b_printf:
     db      "printf"
 .len                equ $ - b_printf
@@ -178,6 +184,8 @@ reserved:
     dq      k_break, k_break.len
     dq      k_continue, k_continue.len
     dq      k_int, k_int.len
+    dq      k_return, k_return.len
+    dq      k_void, k_void.len
     dq      b_printf, b_printf.len
     dq      0, 0
 
