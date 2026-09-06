@@ -96,5 +96,6 @@ exit /b 127
 :linked
 echo built %BIN%
 if /i "%~1"=="--build" exit /b 0
-"%BIN%"
+rem anything else was meant for the interpreter, not for us
+"%BIN%" %*
 exit /b %errorlevel%

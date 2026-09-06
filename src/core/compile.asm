@@ -504,9 +504,11 @@ emit_node:
     jmp     .argument
 .invoke:
     pop     r12
-    mov     edi, OP_PRINTF
+    mov     edi, OP_BI
     call    code_op
-    mov     rdi, [rbx + NODE_RHS]
+    mov     rdi, [rbx + NODE_VAL]       ; which builtin
+    call    code_u32
+    mov     rdi, [rbx + NODE_RHS]       ; how many arguments are on the stack
     call    code_u32
     mov     rdi, [rbx + NODE_POS]
     lea     rax, [src_buf]

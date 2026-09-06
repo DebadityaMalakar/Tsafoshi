@@ -50,6 +50,7 @@
     global  err_code
     global  err_quiet_caret
     global  err_reading_file
+    global  err_at_prompt
 
     extern  src_buf
     extern  src_line_start
@@ -327,6 +328,12 @@ err_report:
 ; Reading a file rather than a prompt: no echo to point at, so print the line.
 err_reading_file:
     mov     qword [err_interactive], 0
+    ret
+
+; And back again, for "-i": the program is over, the prompt is up, and the
+; terminal is echoing what gets typed at it once more.
+err_at_prompt:
+    mov     qword [err_interactive], 1
     ret
 
 ; ---------------------------------------------------------------------------

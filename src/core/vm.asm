@@ -55,7 +55,7 @@
     extern  func_frame
     extern  func_entry
     extern  str_addr
-    extern  printf_run
+    extern  builtin_run
     extern  err_code
     extern  err_deep
     extern  err_stackfull
@@ -113,18 +113,24 @@ vm_run:
     jmp     .step
 
 ; The arguments are already contiguous and in order on the operand stack, so
-; the call needs no marshalling at all -- just a pointer into it.  r8 = count
-.op_printf:
+; the call needs no marshalling at all -- just a pointer into it. That is the
+; whole reason every builtin was given the same signature: this handler does
+; not know which one it is running.
+;
+; r8 = count, r9 = which builtin
+.op_bi:
+    call    fetch_u32
+    mov     r9, rax
     call    fetch_u32
     mov     r8, rax
     call    fetch_pos
-    mov     rdx, rcx
     mov     rax, r8
     imul    rax, rax, CELL
-    sub     r12, rax
-    mov     rdi, r12
-    mov     rsi, r8
-    call    printf_run
+    sub     r12, rax                    ; the arguments leave, the result lands
+    mov     rdi, r9
+    mov     rsi, r12
+    mov     rdx, r8
+    call    builtin_run
     jmp     .push_checked
 
 ; The three unary operators rewrite the top of the stack in place, so none of
@@ -343,7 +349,7 @@ vm_table:
     dq      vm_run.op_load              ; OP_LOAD
     dq      vm_run.op_store             ; OP_STORE
     dq      vm_run.op_str               ; OP_STR
-    dq      vm_run.op_printf            ; OP_PRINTF
+    dq      vm_run.op_bi                ; OP_BI
     dq      vm_run.op_jmp               ; OP_JMP
     dq      vm_run.op_jz                ; OP_JZ
     dq      vm_run.op_jnz               ; OP_JNZ

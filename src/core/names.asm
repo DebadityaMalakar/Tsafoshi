@@ -137,9 +137,10 @@ slot_text:
 ; ---------------------------------------------------------------------------
     section .data
 
-; The keywords, in TK_IF .. TK_INT order, then the builtins. Zero ends it.
-; This list and the TK_/BI_ constants in tsafoshi.inc are the same fact stated
-; twice; KW_COUNT is what keeps them honest.
+; The keywords, in TK_IF .. TK_VOID order, then the builtins in BI_ order.
+; Zero ends it. This list, the TK_/BI_ constants in tsafoshi.inc and the table
+; in builtin.asm are the same fact stated three times; KW_COUNT and BI_COUNT
+; are what keep them honest.
 k_if:
     db      "if"
 .len                equ $ - k_if
@@ -173,6 +174,15 @@ k_void:
 b_printf:
     db      "printf"
 .len                equ $ - b_printf
+b_argc:
+    db      "argc"
+.len                equ $ - b_argc
+b_argv:
+    db      "argv"
+.len                equ $ - b_argv
+b_exit:
+    db      "exit"
+.len                equ $ - b_exit
 
     align   8
 reserved:
@@ -187,6 +197,9 @@ reserved:
     dq      k_return, k_return.len
     dq      k_void, k_void.len
     dq      b_printf, b_printf.len
+    dq      b_argc, b_argc.len
+    dq      b_argv, b_argv.len
+    dq      b_exit, b_exit.len
     dq      0, 0
 
 ; ---------------------------------------------------------------------------

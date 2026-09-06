@@ -162,6 +162,19 @@ disasm_range:
     call    sys_write_stdout
     jmp     .endline
 
+; The builtin is named rather than numbered, because the name is still there:
+; it was interned before any input was read and nothing ever releases it.
+.builtin:
+    call    take_u32
+    mov     rdi, rax
+    call    name_text
+    mov     rsi, rax
+    call    sys_write_stdout
+    lea     rsi, [t_space]
+    mov     rdx, 1
+    call    sys_write_stdout
+    ; fall through to the count, then the column
+
 .count:
     call    take_u32
     call    fmt_i64
@@ -247,7 +260,7 @@ mnemonics:
     db      "load   "                   ; OP_LOAD
     db      "store  "                   ; OP_STORE
     db      "str    "                   ; OP_STR
-    db      "printf "                   ; OP_PRINTF
+    db      "bi     "                   ; OP_BI
     db      "jmp    "                   ; OP_JMP
     db      "jz     "                   ; OP_JZ
     db      "jnz    "                   ; OP_JNZ
@@ -271,7 +284,7 @@ operands:
     db      0                           ; OP_POP
     db      3, 3                        ; OP_LOAD OP_STORE storage slot
     db      4                           ; OP_STR      arena offset
-    db      5                           ; OP_PRINTF   count, then a column
+    db      9                           ; OP_BI  builtin, count, column
     db      6, 6, 6                     ; OP_JMP OP_JZ OP_JNZ  a target
     db      7, 7                        ; OP_LOADL OP_STOREL   frame offset
     db      8                           ; OP_CALL     a function
@@ -288,6 +301,7 @@ operand_table:
     dq      disasm_range.target
     dq      disasm_range.frame
     dq      disasm_range.callee
+    dq      disasm_range.builtin
 
 t_indent:
     db      "    "

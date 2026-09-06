@@ -40,7 +40,7 @@
     extern  src_buf
     extern  err_stackfull
     extern  str_addr
-    extern  printf_run
+    extern  builtin_run
     extern  err_code
 
     section .text
@@ -442,8 +442,8 @@ ast_eval:
     ret
 
 ; Arguments are gathered into a contiguous block before the call, because that
-; is the shape printf_run wants -- and it is the shape they are already in on
-; the VM's operand stack, which is why one routine serves both engines.
+; is the shape every builtin wants -- and it is the shape they are already in
+; on the VM's operand stack, which is why one routine serves both engines.
 ; rbx = the call node, r12 = the next argument, r13 = how many so far
 .call:
     push    rbx
@@ -465,10 +465,11 @@ ast_eval:
     mov     r12, [r12 + NODE_RHS]
     jmp     .argument
 .invoke:
-    mov     rdi, rsp
-    mov     rsi, r13
-    mov     rdx, [rbx + NODE_POS]
-    call    printf_run                  ; BI_PRINTF is the only builtin
+    mov     rdi, [rbx + NODE_VAL]       ; which builtin
+    mov     rsi, rsp
+    mov     rdx, r13
+    mov     rcx, [rbx + NODE_POS]
+    call    builtin_run
     jmp     .call_out
 .call_failed:
     xor     eax, eax

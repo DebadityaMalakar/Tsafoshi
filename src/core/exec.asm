@@ -11,6 +11,7 @@
     global  exec_run
     global  exec_define
     global  exec_command
+    global  exec_select_engine
 
     extern  eval_program
     extern  code_compile
@@ -120,6 +121,30 @@ exec_run:
     xor     eax, eax
     ret
 
+; rdi = a name -> rax = 1 if it named an engine, which is now the one running.
+;
+; The command and the --engine flag both come here, because they are the same
+; act; only the command reports what it did afterwards.
+exec_select_engine:
+    lea     rsi, [w_tree]
+    call    match_word
+    test    rax, rax
+    jnz     .tree
+    lea     rsi, [w_bytecode]
+    call    match_word
+    test    rax, rax
+    jnz     .bytecode
+    xor     eax, eax
+    ret
+.tree:
+    mov     qword [engine_bytecode], 0
+    mov     eax, 1
+    ret
+.bytecode:
+    mov     qword [engine_bytecode], 1
+    mov     eax, 1
+    ret
+
 ; rdi = the command text, already past the colon. Handles "engine",
 ; "engine <name>" and "dis". -> rax = 1 if it was ours.
 exec_command:
@@ -157,24 +182,14 @@ exec_command:
     call    skip_blanks
     cmp     byte [rdi], 0
     je      .show
-    lea     rsi, [w_tree]
-    call    match_word
+    call    exec_select_engine
     test    rax, rax
-    jnz     .use_tree
-    lea     rsi, [w_bytecode]
-    call    match_word
-    test    rax, rax
-    jnz     .use_bytecode
+    jnz     .show
     lea     rsi, [m_unknown]
     mov     rdx, m_unknown.len
     call    sys_write_stderr
     mov     eax, 1
     ret
-.use_tree:
-    mov     qword [engine_bytecode], 0
-    jmp     .show
-.use_bytecode:
-    mov     qword [engine_bytecode], 1
 
 .show:
     lea     rsi, [m_engine]

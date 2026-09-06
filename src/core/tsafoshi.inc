@@ -166,8 +166,20 @@ NAME_LEN            equ 32              ; bytes per name, NUL included
 ; Keywords and builtin functions occupy the first name slots, interned before
 ; any input is read, so recognising either is a compare against a constant.
 KW_COUNT            equ 10              ; TK_IF .. TK_VOID
+
+; The builtins. Each is a name the session cannot rebind and a routine inside
+; this binary, and the table in builtin.asm gives every one of them the same
+; shape -- an argument block, a count, a position -- so the two engines call
+; all of them through one door. printf is the variadic one; the rest take a
+; fixed number of arguments and the parser checks it.
 BI_PRINTF           equ KW_COUNT
-BI_COUNT            equ KW_COUNT + 1    ; the first slot a user name can have
+BI_ARGC             equ KW_COUNT + 1
+BI_ARGV             equ KW_COUNT + 2
+BI_EXIT             equ KW_COUNT + 3
+BI_COUNT            equ KW_COUNT + 4    ; the first slot a user name can have
+
+BI_FIRST            equ BI_PRINTF
+BI_VARIADIC         equ -1              ; an arity that means "at least one"
 
 ARG_MAX             equ 16              ; arguments in one call
 
@@ -182,6 +194,15 @@ SCOPE_DEPTH         equ 32              ; nested blocks
 ; so the same offset means a different cell on every recursion.
 VAR_GLOBAL          equ 0
 VAR_LOCAL           equ 1
+
+; Where a session's source comes from. The command line decides this once,
+; before anything is read, and the rest of the interpreter never asks again.
+CLI_NONE            equ 0               ; nothing was named: a session
+CLI_FILE            equ 1               ; a path
+CLI_EVAL            equ 2               ; -e, one submission spelled inline
+CLI_STDIN           equ 3               ; "-", or a pipe with no terminal
+
+ARGV_PROG           equ 32              ; arguments a program can be given
 
 ; Functions, and the managed C stack their locals live on.
 FUNC_CAP            equ 128             ; functions per session
@@ -229,7 +250,7 @@ OP_POP              equ 21
 OP_LOAD             equ 22              ; 4-byte storage slot
 OP_STORE            equ 23              ; 4-byte storage slot, value stays
 OP_STR              equ 24              ; 4-byte offset into the string arena
-OP_PRINTF           equ 25              ; 4-byte count, then a 4-byte column
+OP_BI               equ 25              ; 4-byte builtin, count, column
 OP_JMP              equ 26              ; 4-byte target
 OP_JZ               equ 27              ; pops, jumps if it was zero
 OP_JNZ              equ 28              ; pops, jumps if it was not

@@ -154,9 +154,18 @@ printf_run:
     jmp     .emit_text
 
 ; The precision, where there is one, caps the length rather than the value.
+;
+; A null pointer is undefined behaviour in C and a segfault if taken at its
+; word. Since argv(argc()) is deliberately null, it would be a poor trade to
+; make the one honest way of reaching the end of the arguments also the way to
+; crash the interpreter, so it prints what every libc worth using prints.
 .string:
     call    next_arg
     mov     rsi, rax
+    test    rsi, rsi
+    jnz     .measure
+    lea     rsi, [t_null]
+.measure:
     xor     edx, edx
 .length:
     cmp     qword [pf_prec], 0
@@ -361,6 +370,8 @@ conv_table:
 
 t_modifiers:
     db      "lhzjt", 0
+t_null:
+    db      "(null)", 0
 t_percent:
     db      "%"
 t_hex_prefix:

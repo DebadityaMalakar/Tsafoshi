@@ -18,6 +18,7 @@
     global  mode_prec
     global  mode_bump
     global  mode_command
+    global  mode_select
 
     extern  match_word
     extern  skip_blanks
@@ -46,6 +47,42 @@ mode_prec:
 .out:
     ret
 
+; rdi = a name -> rax = 1 if it named a mode, which is now the current one.
+;
+; Split out from the command because ":mode ltr" and "--mode ltr" are the same
+; act asked for twice, and the only difference between them is that one of them
+; says so afterwards.
+;
+; rbx = the entry being tried
+mode_select:
+    push    rbx
+    lea     rbx, [mode_table]
+.try:
+    lea     rcx, [mode_end]
+    cmp     rbx, rcx
+    jae     .no
+    mov     rsi, [rbx + MODE_NAME]
+    push    rbx
+    call    match_word                  ; rdi survives, so we can keep trying
+    pop     rbx
+    test    rax, rax
+    jnz     .yes
+    add     rbx, MODE_ENT
+    jmp     .try
+.yes:
+    mov     [mode_active], rbx
+    mov     rax, [rbx + MODE_ROW]
+    mov     [mode_row], rax
+    mov     rax, [rbx + MODE_BUMP]
+    mov     [mode_bump], rax
+    mov     eax, 1
+    pop     rbx
+    ret
+.no:
+    xor     eax, eax
+    pop     rbx
+    ret
+
 ; rdi = the command text, already past the colon. Handles "mode" and
 ; "mode <name>". -> rax = 1 if it was ours and has been dealt with.
 mode_command:
@@ -60,26 +97,9 @@ mode_command:
     cmp     byte [rdi], 0
     je      .show
 
-    lea     rbx, [mode_table]
-.try:
-    lea     rcx, [mode_end]
-    cmp     rbx, rcx
-    jae     .unknown
-    mov     rsi, [rbx + MODE_NAME]
-    push    rbx
-    call    match_word                  ; rdi survives, so we can keep trying
-    pop     rbx
+    call    mode_select
     test    rax, rax
-    jnz     .found
-    add     rbx, MODE_ENT
-    jmp     .try
-
-.found:
-    mov     [mode_active], rbx
-    mov     rax, [rbx + MODE_ROW]
-    mov     [mode_row], rax
-    mov     rax, [rbx + MODE_BUMP]
-    mov     [mode_bump], rax
+    jz      .unknown
     call    print_current
     jmp     .handled
 

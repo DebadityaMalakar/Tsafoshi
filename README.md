@@ -101,8 +101,8 @@ assistance, not as reviewed, production-grade work.
 | **2.1** | Variables, assignment, statements, `printf` | **done** |
 | **2.2** | `if` / `while` / `for` / `do`, jumps, blocks and scope | **done** |
 | **2.3** | The VM call stack, user-defined functions, running a `.c` file | **done** |
-| 3.1 | A proper command line: flags, `argv`, exit status, a REPL that knows it is one | next |
-| 3.2 | Types: `char`, `int`, `long`, `_Bool`, `sizeof`, conversions, typed opcodes | |
+| **3.1** | A proper command line: flags, `argv`, exit status, a REPL that knows it is one | **done** |
+| 3.2 | Types: `char`, `int`, `long`, `_Bool`, `sizeof`, conversions, typed opcodes | next |
 | 3.3 | Pointers and arrays: `&`, `*`, subscripting, pointer arithmetic, real strings | |
 | 3.4 | `struct` and `union`, member access, passing and returning them | |
 | 4 | Native call bridge — real libc behind the builtins | |
@@ -194,11 +194,12 @@ CMake — the build is a file list and one link step.
 **Linux**
 
 ```sh
-./run.sh              # format, build, then start the REPL
-./run.sh --build      # format and build only
-./run.sh --check      # fail if any source is unformatted (CI)
-./run.sh --clean      # rm -rf build/
-echo "1 + 2 * 3" | ./run.sh
+./run.sh                    # format, build, then start the REPL
+./run.sh --build            # format and build only
+./run.sh --check            # fail if any source is unformatted (CI)
+./run.sh --clean            # rm -rf build/
+./run.sh examples/gcd.c     # anything else goes to the interpreter
+echo "1 + 2 * 3" | ./run.sh -i
 ```
 
 **Windows**
@@ -287,6 +288,12 @@ Every command starts with a colon:
 | `:vars` | every variable and its value |
 | `:help` | the list above |
 | `:quit`, `:exit`, `:q`, EOF | leave |
+
+Commands belong to the session and not to the language, so they are read only
+where there is a session to read them: `-e` and a piped program have none, and
+`:dis` in either is just an expression that starts with a colon and does not
+parse. `tsafoshi -i` gives a session over a pipe, which is how the commands get
+tested by a script.
 
 Through stage 1.5 these were bare words, matched before the parser saw the
 line, which made `mode`, `engine` and `dis` reserved. That was harmless while
@@ -584,9 +591,7 @@ line the error is on. At a prompt the terminal already printed that line, so
 the caret only has to clear the prompt; reading a file, nothing did, so the
 line is printed first.
 
-There is exactly one argument for now, and it is a path. Flags, `argv` reaching
-`main`, and a REPL that knows whether it is talking to a terminal are stage
-3.1.
+A file is one of four things the command line can name; the rest are below.
 
 ### `#include`, and where `main` goes
 
@@ -615,8 +620,152 @@ handled by not tripping over it.
 
 `main(int argc, char **argv)` needs pointers, so for now only `int main(void)`
 is accepted and the other form is refused rather than silently mistaken for it.
+The arguments themselves are not missing — they arrive through `argc()` and
+`argv(n)`, below.
 
 See [`examples/`](examples/) for programs that run today.
+
+## The command line
+
+```
+usage: tsafoshi [options] [file] [arguments...]
+       tsafoshi [options] -e code [arguments...]
+       tsafoshi [options] -    [arguments...]
+```
+
+| Option | Effect |
+|---|---|
+| `-e`, `--eval` *code* | run *code* as one submission, then leave |
+| `-i`, `--interactive` | stay at the prompt afterwards |
+| `-q`, `--quiet` | no banner |
+| `--engine` *name* | `bytecode` or `tree`, before anything runs |
+| `--mode` *name* | `bodmas`, `ltr` or `rtl`, likewise |
+| `-v`, `--version` | print the version and leave |
+| `-h`, `--help` | print the usage and leave |
+| `--` | end of options; everything after belongs to the program |
+
+The shape is Python's, because Python's is the one people already have in
+their fingers. Two rules do all the work: **the first non-option argument is
+the source, and everything after it is the program's** — not read as an option
+however much it looks like one — and `--` says so explicitly, for the file
+genuinely called `-e`.
+
+```sh
+$ tsafoshi -e '2 + 3 * 4'
+= 14
+$ tsafoshi --mode ltr -e '2 + 3 * 4'
+= 20
+$ tsafoshi -e 'int n = 5; printf("n squared is %d
+", n * n);'
+n squared is 25
+```
+
+`-e` is one submission typed somewhere other than the prompt, so it behaves
+like one: a bare expression at the end is answered, a trailing `;` silences it,
+and `main` is called only if the code bothered to define one. Anything else
+would make the flag a different language from the prompt it imitates.
+
+### A terminal gets a session, a pipe gets a program
+
+With no file and no `-e`, what happens depends on **who is on the other end of
+standard input**:
+
+```sh
+$ tsafoshi                          # a terminal: the REPL, banner and all
+$ echo 'printf("%d
+", 6 * 7);' | tsafoshi
+42
+```
+
+That is one `sys_isatty` call and it settles three things at once — whether to
+print a banner, whether to print prompts, and how an error draws its caret.
+They are the same question asked three ways: is anyone watching the screen. A
+prompt down a pipe is not a prompt; it is the first thing the reader on the
+other end has to learn to ignore.
+
+`-i` overrides the guess in both directions. On its own it means *a session,
+whatever standard input is* — which is how the REPL gets tested by a script:
+
+```sh
+$ printf ':engine tree
+int sq(int n) { return n * n; }
+sq(9)
+' | tsafoshi -i
+engine: tree
+= 81
+```
+
+After a file or a `-e` it means *stay*, and everything the program defined is
+still there to talk to, because the names, globals, functions and their code
+all outlive the submission that made them.
+
+### Exit status
+
+| | |
+|---|---|
+| `0` | it worked; or `main` returned 0; or a session ended |
+| whatever `main` returned | a program that ran to the end |
+| `1` | something went wrong: a parse error, a runtime error, an unreadable file |
+| `2` | the *command line* was wrong — an unknown option, or one missing its value |
+
+Two failure codes rather than one, because a shell script wants to tell "your
+program is broken" apart from "you called me wrong".
+
+### `argc()`, `argv(n)`, and `exit(n)`
+
+Three builtins joined `printf` at this stage:
+
+| | |
+|---|---|
+| `argc()` | how many arguments the program was given, `argv(0)` included |
+| `argv(n)` | one of them, as a NUL-terminated string |
+| `exit(n)` | stop now, with that status |
+
+```c
+#include <stdio.h>
+
+int main(void)
+{
+    int i;
+
+    printf("%d argument", argc());
+    if (argc() != 1)
+        printf("s");
+    printf(":
+");
+
+    for (i = 0; i < argc(); i = i + 1)
+        printf("  %d  %s
+", i, argv(i));
+
+    return 0;
+}
+```
+
+```sh
+$ tsafoshi examples/args.c alpha beta
+3 arguments:
+  0  examples/args.c
+  1  alpha
+  2  beta
+```
+
+Functions rather than `main`'s parameters, and that is a limitation stated
+honestly rather than a design: naming `char **argv` needs a pointer type, and
+pointers are stage 3.3. The information is the same either way — a string
+literal has been an address in a cell since stage 2.1, and `argv`'s strings are
+addresses of exactly that kind — so `argv(argc())` is a null pointer for
+precisely the reason it is in C. `printf` prints one as `(null)` rather than
+following it, because the one honest way to walk off the end of the arguments
+should not also be the way to bring the interpreter down.
+
+`exit` leaves from wherever it is called — inside a loop, inside a function,
+ten frames down — and there is nothing to unwind on the way: the frames are
+ours, the arenas are ours, and the process is about to stop being.
+
+All four builtins are one table in `builtin.asm`, one opcode, and one arm of
+each engine. Adding a fifth is a line in that table, a line in `names.asm`, and
+a constant.
 
 ## Comments
 
@@ -672,7 +821,7 @@ where one is needed:
 | `pop` | | discard the top |
 | `load` `store` | 4-byte storage slot | read a variable, or write one |
 | `str` | 4-byte arena offset | push a literal's address |
-| `printf` | 4-byte count, then a 4-byte column | consume that many arguments, push the byte count |
+| `bi` | 4-byte builtin, 4-byte count, 4-byte column | call a builtin on that many arguments, push its result |
 | `jmp` | 4-byte target | go there |
 | `jz` `jnz` | 4-byte target | pop one cell, go there if it was / was not zero |
 | `loadl` `storel` | 4-byte frame offset | read or write a local, relative to the frame pointer |
@@ -704,15 +853,19 @@ the next line. Nothing is ever moved, which is what lets an entry point be a
 plain offset that stays valid for the session — and it is why `:dis` lists a
 range rather than the whole thing.
 
-`div`, `mod` and `printf` are the only operations that can fail, and by the
-time the VM is running there is no tree left to ask where they came from — so
-those three carry the column they were written at, and a division by zero still
-gets its caret in the right place. Nothing else pays for that.
+`div`, `mod` and `bi` are the only operations that can fail, and by the time
+the VM is running there is no tree left to ask where they came from — so those
+three carry the column they were written at, and a division by zero still gets
+its caret in the right place. Nothing else pays for that.
 
-`printf` is one opcode rather than a calling convention because its arguments
-are *already* contiguous and in order on the operand stack, which is exactly
-the array a format-string interpreter wants. The tree walker has to build that
-array by hand; the VM just passes a pointer into its own stack.
+`bi` is one opcode for every builtin rather than a calling convention because
+the arguments are *already* contiguous and in order on the operand stack, which
+is exactly the array a builtin wants. The tree walker has to build that array
+by hand; the VM just passes a pointer into its own stack. Through stage 2.3
+this opcode was called `printf`, because `printf` was the only thing it could
+be; giving every builtin the same signature turned it into a table lookup and
+one dispatch arm, which is also the door stage 4's native bridge walks in
+through.
 
 ### Jumps, and holes that remember each other
 
@@ -813,8 +966,9 @@ src/
   main.asm              _start -> repl_main. The entry point, and nothing else.
   core/                 platform-independent, assembled once
     tsafoshi.inc        shared constants and token kinds
-    repl.asm            the read-eval-print loop
-    script.asm          running a .c file, and reaching its main
+    cli.asm             the command line: options, source, the program's argv
+    repl.asm            the read-eval-print loop, and whether to have one
+    script.asm          running a file, a pipe or a -e, and reaching main
     readline.asm        buffered line input, and the multi-line submission
     lexer.asm           source text -> tokens, comments and all
     names.asm           identifier interning: text -> a stable slot
@@ -832,18 +986,20 @@ src/
     op.asm              operator semantics (values)
     vars.asm            global storage, the managed C stack, and ":vars"
     printf.asm          the format-string interpreter
+    builtin.asm         the builtin table: printf, argc, argv, exit
     mode.asm            evaluation order, and the ":mode" command
     error.asm           diagnostics and the caret
     format.asm          number formatting, output helpers
-  linux/input.asm       console I/O, Linux syscalls
+  linux/input.asm       console I/O and isatty, Linux syscalls
   linux/readfile.asm    files and argv, Linux syscalls
-  windows/input.asm     console I/O, Windows kernel32
+  windows/input.asm     console I/O and isatty, Windows kernel32
   windows/readfile.asm  files and argv, Windows kernel32
 tools/prettier.py       source layout normalizer
 ```
 
-Start reading at `src/main.asm`. It is five instructions: align the stack, cut
-the frame chain, call `repl_main`. Both platforms share it — Linux `ld` picks
+Start reading at `src/main.asm`. It is five instructions: hand the loader's
+stack to `sys_args_init`, align the stack, cut the frame chain, call
+`repl_main`. Both platforms share it — Linux `ld` picks
 `_start` up by default and the Windows linkers are passed `/entry:_start`, so
 there is no conditional assembly anywhere in the tree.
 
@@ -869,11 +1025,12 @@ The build is `src/main.asm` plus `src/core/*.asm` plus exactly one
 | engine → vars | `frame_enter(size)` / `frame_args(from, n)` / `frame_leave(fp)` — the managed C stack, shared by both engines |
 | parser → func | `func_declare(name, arity)` before the body, `func_set_body` / `func_set_frame` after it |
 | engine → func | `func_arity` / `func_frame` / `func_entry` for the VM, `func_body` for the walker |
-| engine → printf | `printf_run(args, count, pos)` — one array of cells, whichever engine built it |
+| engine → builtin | `builtin_run(id, args, count, pos)` — one array of cells, whichever engine built it, and one signature for every builtin |
+| repl → cli | `cli_parse`, then `cli_kind` / `cli_text` / `cli_argc` — what was asked for, decided once, before anything is read |
 | compiler → code | `code_op` / `code_i64` / `code_u32` to write, and `code_jump` / `code_patch` for a jump whose target is not known yet |
 | compiler → vm | the code buffer in `code.asm`; neither module owns the memory, so `disasm.asm` reads it without either knowing |
 | anything → error | `err_expected` / `err_divzero` / `err_notlvalue` / `err_badconv` and the rest, each taking a position |
-| core → platform | the four `sys_*` routines below |
+| core → platform | the nine `sys_*` routines below |
 
 The tree is the seam that matters. The parser builds nodes and never computes
 a value; a consumer walks nodes and never looks at a token. That is what made
@@ -911,7 +1068,7 @@ a limit you can hit today.
 
 ### The platform contract
 
-A target provides eight routines across two files, and the entry point is not
+A target provides nine routines across two files, and the entry point is not
 one of them — `src/main.asm` is shared. `input.asm` is the console:
 
 | | |
@@ -919,6 +1076,7 @@ one of them — `src/main.asm` is shared. `input.asm` is the console:
 | `sys_write_stdout` | `rsi` = buffer, `rdx` = length |
 | `sys_write_stderr` | `rsi` = buffer, `rdx` = length |
 | `sys_read_stdin` | `rsi` = buffer, `rdx` = capacity → `rax` = bytes, `<= 0` at EOF |
+| `sys_isatty` | `rdi` = 0 for stdin, 1 for stdout → `rax` = 1 if it is a terminal |
 | `sys_exit` | `edi` = status, does not return |
 
 and `readfile.asm` is files and the command line:
@@ -936,7 +1094,10 @@ where the platforms genuinely diverge rather than merely differ in spelling: a
 Linux file is an integer read by the same call that reads a pipe, and a Windows
 file is an opaque handle from `CreateFileA`. Likewise the command line, which
 Linux leaves on the initial stack and Windows makes you ask for and split
-yourself. `src/main.asm` hands `rsp` to `sys_args_init` without knowing which
+yourself. `sys_isatty` is the same story a third time: there is no such
+syscall on Linux, so it asks the descriptor for terminal settings and reads the
+kernel's objection, while Windows calls `GetConsoleMode` and reads its
+failure. `src/main.asm` hands `rsp` to `sys_args_init` without knowing which
 of those is true, and each target decides whether that was useful.
 
 They may clobber the caller-saved registers freely. `rbx` and `r12`–`r15` must

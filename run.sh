@@ -63,4 +63,6 @@ echo "built $BIN"
 case "${1:-}" in
     --build) exit 0 ;;
 esac
-exec "$BIN"
+
+# Anything else was meant for the interpreter, not for us.
+exec "$BIN" "$@"

@@ -89,6 +89,7 @@
     extern  func_declare
     extern  func_find
     extern  func_arity
+    extern  builtin_arity
     extern  func_set_body
     extern  func_set_frame
     extern  scope_enter_function
@@ -1301,8 +1302,20 @@ parse_call:
     test    r12, FN_TAG
     jnz     .invoke
 
-    test    r15, r15                    ; printf's format is not optional
+; A builtin knows its own arity, so a call that disagrees is caught here too.
+; printf is the one that cannot: it takes a format and then whatever the format
+; asks for, so all that can be insisted on is that the format is there.
+    mov     rdi, r12
+    call    builtin_arity
+    cmp     rax, BI_VARIADIC
+    je      .variadic
+    cmp     rax, r15
+    jne     .wrong_count
+    jmp     .builtin_go
+.variadic:
+    test    r15, r15
     jz      .no_format
+.builtin_go:
     mov     rdi, r12
     mov     rsi, r13
     mov     rdx, r15

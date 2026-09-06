@@ -13,11 +13,13 @@
     global  sys_write_stderr
     global  sys_read_stdin
     global  sys_exit
+    global  sys_isatty
 
     extern  GetStdHandle
     extern  ReadFile
     extern  WriteFile
     extern  ExitProcess
+    extern  GetConsoleMode
 
 STD_INPUT_HANDLE    equ -10
 STD_OUTPUT_HANDLE   equ -11
@@ -78,6 +80,37 @@ sys_read_stdin:
     mov     eax, dword [rbp-24]
     jmp     .out
 .failed:
+    xor     eax, eax
+.out:
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+; rdi = 0 for stdin, 1 for stdout -> rax = 1 if that is a console.
+;
+; The same question the Linux side asks, and answered the same way: try the one
+; call only a terminal will accept and see whether it does. GetConsoleMode
+; fails on a pipe, a file and a redirected handle, which between them are every
+; case where prompting somebody would be prompting nobody.
+sys_isatty:
+    push    rbp
+    mov     rbp, rsp
+    sub     rsp, 96
+    and     rsp, -16
+    mov     ecx, STD_INPUT_HANDLE
+    test    rdi, rdi
+    jz      .ask
+    mov     ecx, STD_OUTPUT_HANDLE
+.ask:
+    call    GetStdHandle
+    mov     rcx, rax
+    lea     rdx, [rbp-8]                ; lpMode, wanted and then thrown away
+    call    GetConsoleMode
+    test    eax, eax
+    jz      .no
+    mov     eax, 1
+    jmp     .out
+.no:
     xor     eax, eax
 .out:
     mov     rsp, rbp
