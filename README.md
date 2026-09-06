@@ -105,9 +105,67 @@ assistance, not as reviewed, production-grade work.
 | **3.2** | Types: `char`, `short`, `int`, `long`, `_Bool`, `signed` / `unsigned`, `sizeof`, casts, conversions, typed opcodes | **done** |
 | 3.3 | Pointers and arrays: `&`, `*`, subscripting, pointer arithmetic, real strings | next |
 | 3.4 | `struct` and `union`, member access, passing and returning them | |
-| 4 | Native call bridge — real libc behind the builtins | |
-| 5 | Preprocessor: `#include` (standard headers ignored, user `.c` files included once), `#define`, `#if`, `__VA_ARGS__` | |
+| 3.5 | `float` and `double`: SSE, literals, conversions, `%f` | |
+| 4.1 | The library bridge: one signature, a lazily bound table, `<stdarg.h>` | |
+| 4.2 | `<string.h>`, `<ctype.h>` — bytes and characters | |
+| 4.3 | `<stdlib.h>` — an allocator, conversions, `qsort`, `rand` | |
+| 4.4 | `<stdio.h>` in full — `FILE`, the `f*` family, `sprintf`, input | |
+| 4.5 | `<math.h>` — needs 3.5 | |
+| 4.6 | `<stddef.h>` `<stdint.h>` `<limits.h>` `<float.h>` `<stdbool.h>` `<inttypes.h>` — types and constants | |
+| 4.7 | `<time.h>` `<assert.h>` `<errno.h>` `<signal.h>` `<setjmp.h>` | |
+| 5 | Preprocessor: `#include` resolving to `.c`, `#define`, `#if`, `__VA_ARGS__` | |
 | 6 | The rest of C99 — VLAs, designated initializers, compound literals | |
+| 7 | The end game: a raylib port, and Tetris on top of it | |
+
+### The standard library, and why it is seven stages
+
+**There is no libc to bridge to.** The founding rule of this project is C
+without using C, and linking glibc to get `strlen` would end it — so the
+standard library is *written here*, in assembly, alongside everything else.
+That is a correction to what this table used to say. A bridge to a real libc
+would have been a smaller job and a different project.
+
+They are **built in, and bound on use**. The whole library is one read-only
+table in the binary: a module, a name, an arity, a signature, and the address
+of a routine. Nothing is interned, allocated or wired at startup. The first
+time a program *names* `strlen`, that one entry is bound — a name slot, a
+builtin id, an arity the parser can check — and the other two hundred entries
+cost exactly what they cost sitting in `.rodata`, which is nothing you can
+measure. A program that never mentions `<math.h>` pays nothing for it, and
+start-up stays what it is today: no allocation and no syscalls.
+
+Which is also what keeps `#include` honest. Since stage 2.3 a `#include` line
+has been accepted and ignored, because the library was already there; that
+does not change when the library gets large. `#include <string.h>` remains a
+statement of what you depend on rather than an instruction to go and get it,
+and a program that forgets the line still works, exactly as it does now.
+
+| Stage | | Wants |
+|---|---|---|
+| **4.1** | **The bridge.** One signature for every library routine, the lazy binding above, arity and type checking in the parser, and `<stdarg.h>` — variadics are a calling-convention question, so they belong with the convention. | 3.3 |
+| **4.2** | **`<string.h>`, `<ctype.h>`.** `strlen` `strcpy` `strcmp` `strcat` `strchr` `strstr` `memcpy` `memmove` `memset` `memcmp`, and the twelve `is*` / `to*`. The pure ones: bytes in, bytes out, no allocation and no platform. | 3.3 |
+| **4.3** | **`<stdlib.h>`.** `malloc` `free` `calloc` `realloc` against a real allocator, `atoi` `strtol` `strtod`, `abs` `labs` `div`, `rand` `srand`, `qsort` `bsearch`, `abort` `getenv`. The allocator grows the platform seam by one routine — `mmap` on Linux, `VirtualAlloc` on Windows — and is the first thing here that needs one. | 3.3 |
+| **4.4** | **`<stdio.h>` in full.** What exists today is one `printf` writing to one descriptor. This is `FILE`, `fopen` `fclose` `fread` `fwrite` `fseek` `ftell` `feof`, `fprintf` `sprintf` `snprintf` `vsnprintf`, `puts` `putchar` `fgets` `getchar`, and the `scanf` family. `printf_run` already parses a format; it grows a destination. | 3.4 |
+| **4.5** | **`<math.h>`.** `sqrt` `fabs` `floor` `ceil` `fmod` are single instructions. `sin` `cos` `tan` `atan2` `exp` `log` `pow` are not, and get the x87 transcendentals rather than polynomial approximations written from scratch — which is the one place this project takes the hardware's word for an answer. | 3.5 |
+| **4.6** | **The type and limit headers.** `<stddef.h>` `<stdint.h>` `<limits.h>` `<float.h>` `<stdbool.h>` `<inttypes.h>`. Almost no code: `size_t`, `ptrdiff_t`, `intN_t`, `NULL`, `offsetof`, `bool` / `true` / `false`, and the `*_MAX` constants. The cheapest stage here and the one the most real source silently depends on. | 3.4 |
+| **4.7** | **The rest of what programs include.** `<time.h>` (`time` `clock` `difftime` — and the platform's clock, which raylib will want), `<assert.h>`, `<errno.h>`, `<signal.h>`, `<setjmp.h>`. | 4.1 |
+
+**Deliberately not planned**: `<complex.h>`, `<fenv.h>`, `<tgmath.h>`,
+`<iso646.h>`, `<locale.h>`, `<wchar.h>` and `<wctype.h>`. Seven of C99's
+twenty-four headers, all of them either already ruled out above or a wide
+character model this interpreter has no business pretending to have.
+
+**Why 3.5 exists.** `<math.h>` cannot be written for a language with no
+floating-point type, so `float` and `double` had to land somewhere before 4.5
+— and they are a language feature rather than a library one: SSE registers,
+literals with a decimal point, the conversion rules extended, `%f` in
+`printf`. Putting them in stage 3 with the rest of the type system is where
+they belong; discovering that while splitting stage 4 is the useful part.
+
+**What the end game actually needs.** raylib leans on 4.2, 4.3 and 4.5 hardest
+— `Vector2` maths, allocation, and trigonometry — with 4.4 mostly for asset
+loading and 4.7 for timing. That ordering is not an accident: the substages
+are sorted by what a graphics library asks for first.
 
 ## Target: C99
 
@@ -126,7 +184,7 @@ What choosing C99 specifically commits us to, beyond C89:
 | Declarations anywhere in a block, and in `for` init | parser + scoping, **done** at stage 2.2 |
 | `int main(void)` as the entry point of a file | **done** at stage 2.3 |
 | `long long`, `_Bool` | type system, **done** at stage 3.2 |
-| `<stdbool.h>`, `<stdint.h>` | the preprocessor, stage 5 |
+| `<stdbool.h>`, `<stdint.h>`, `<inttypes.h>` | built in, stage 4.6 |
 | Designated initializers, compound literals | stage 6 |
 | Flexible array members | stage 6 |
 | Variadic macros (`__VA_ARGS__`) | preprocessor, stage 5 |
@@ -143,7 +201,7 @@ stage 6.
 **Deliberately out of scope**, C99 or not: `_Complex` and `_Imaginary` (C11
 made them optional for good reason), and `<threads.h>`-style concurrency.
 Floating point is deferred until the integer language is complete, not
-abandoned.
+abandoned — it is stage 3.5, and `<math.h>` waits on it.
 
 ## The 64-bit cell rule
 
@@ -807,9 +865,23 @@ runs byte-for-byte as written, with the first line doing nothing at all.
 
 The line is blanked out with spaces rather than deleted, so every byte after it
 keeps the offset it had in the file and a caret still lands under the right
-column. This is not the preprocessor — that is stage 5, and it is where
-`#define`, `#if` and including your own `.c` files arrive. It is one directive
+column. This is not the preprocessor — that is stage 5 — it is one directive
 handled by not tripping over it.
+
+**And there will be no header files.** When `#include` becomes real at stage 5,
+`#include <module.h>` resolves to `module.c`, and a module is read exactly
+once. No include guards, no `#pragma once`, and no forward declarations, since
+nothing is ever declared twice for one to be needed. Includes still belong at
+the top of a file, Python-style, because a name has to be known before it is
+used and this interpreter reads a program in one pass.
+
+That is a **real incompatibility with C**, not a shortcut around one, and it is
+the biggest reason not to use Tsafoshi for anything that matters: source that
+relies on a header being a separate, re-includable, declaration-only file will
+not work here. It is deliberate. There is no separate translation unit and no
+linker, so a header has nothing left to do — and a library that ships its `.c`
+files is one this interpreter can read without a build system in front of it,
+which is the point.
 
 `main(int argc, char **argv)` needs pointers, so for now only `int main(void)`
 is accepted and the other form is refused rather than silently mistaken for it.
@@ -1067,7 +1139,7 @@ is exactly the array a builtin wants. The tree walker has to build that array
 by hand; the VM just passes a pointer into its own stack. Through stage 2.3
 this opcode was called `printf`, because `printf` was the only thing it could
 be; giving every builtin the same signature turned it into a table lookup and
-one dispatch arm, which is also the door stage 4's native bridge walks in
+one dispatch arm, which is also the door stage 4.1's library bridge walks in
 through.
 
 ### Jumps, and holes that remember each other
@@ -1393,15 +1465,16 @@ re-read. Once the table exists, an alternate convention costs one more row.
 Having three of them keeps the parser honest: no rule may assume a fixed
 order, because the order is not known until run time.
 
-**Why `printf` is a builtin and not a native call.** Stage 4 is where real
-libc gets bridged in. Doing it now would mean the variadic half of two ABIs,
-an address-space model, and a `char *` that is a genuine host pointer —
-against a language that has no types and no pointers to hand to it. A builtin
-needs none of that and still exercises the parts that matter today: a call
-node, an argument list, arguments arriving contiguously on the operand stack,
-and a runtime error raised from inside the VM with a caret that still lands in
-the right column. When the bridge lands, what changes is where `printf_run`
-sends its bytes, not the shape of anything around it.
+**Why `printf` is a builtin, and what that becomes.** Stage 4 is the standard
+library, written here rather than linked from anywhere, and 4.1 is the table
+and the binding that gets to it. `printf` was built the same way early because
+it exercises the parts that matter — a call node, an argument list, arguments
+arriving contiguously on the operand stack, and a runtime error raised from
+inside the VM with a caret that still lands in the right column — without
+needing an address-space model or a `char *` that is a genuine host pointer.
+Stage 3.1 already generalised it: four builtins now share one signature and one
+opcode. What stage 4 adds is two hundred more entries in that table and the
+lazy binding that keeps them free until something asks.
 
 **Why bytecode at all, this early.** A tree walker would carry the language a
 long way, but every future feature is easier against a linear instruction
