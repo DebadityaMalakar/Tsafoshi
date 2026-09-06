@@ -237,6 +237,8 @@ session:
 
     cmp     qword [parse_silent], 0     ; a trailing ";" makes it a statement
     jne     .loop
+    mov     rdi, [parse_value]
+    mov     rdi, [rdi + NODE_TYPE]
     call    print_result
     jmp     .loop
 
@@ -309,7 +311,7 @@ w_help:
     db      "help", 0
 
 msg_banner:
-    db      "Tsafoshi 0.7 -- stage 3.1: a command line", 10
+    db      "Tsafoshi 0.8 -- stage 3.2: types", 10
     db      "commands start with a colon; ':help' lists them, ':quit' leaves", 10
     db      "everything else is C: int sq(int n) { return n * n; } sq(7)", 10, 10
 .len                equ $ - msg_banner

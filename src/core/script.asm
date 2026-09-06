@@ -231,6 +231,8 @@ run_submission:
     je      .to_main
     cmp     qword [parse_silent], 0
     jne     .to_main
+    mov     rdi, [parse_value]
+    mov     rdi, [rdi + NODE_TYPE]
     call    print_result
 
 .to_main:

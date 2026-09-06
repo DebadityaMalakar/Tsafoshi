@@ -40,6 +40,13 @@
     extern  op_and
     extern  op_xor
     extern  op_or
+    extern  op_udiv
+    extern  op_umod
+    extern  op_ushr
+    extern  op_ult
+    extern  op_ugt
+    extern  op_ule
+    extern  op_uge
     extern  op_neg
     extern  op_not
     extern  op_bnot
@@ -56,6 +63,7 @@
     extern  func_entry
     extern  str_addr
     extern  builtin_run
+    extern  type_convert
     extern  err_code
     extern  err_deep
     extern  err_stackfull
@@ -156,6 +164,8 @@ vm_run:
 ; every other operator because nothing there will ever read it.
 .op_div:
 .op_mod:
+.op_udiv:
+.op_umod:
     push    rax
     call    fetch_pos
     pop     rax
@@ -185,6 +195,18 @@ vm_run:
 .push_back:
     mov     [r12], rax
     add     r12, CELL
+    jmp     .step
+
+; The top of the stack becomes a narrower type and is extended straight back
+; out to a full cell, so the stack stays a stack of cells and the value in it
+; stays honest about which type it is. It cannot fail and it cannot change the
+; stack's height.
+.op_conv:
+    call    fetch_u32
+    mov     rsi, rax
+    mov     rdi, [r12 - CELL]
+    call    type_convert
+    mov     [r12 - CELL], rax
     jmp     .step
 
 ; A local is an offset from the frame of the call that is running, so the same
@@ -342,6 +364,13 @@ vm_table:
     dq      vm_run.op_binary            ; OP_AND
     dq      vm_run.op_binary            ; OP_XOR
     dq      vm_run.op_binary            ; OP_OR
+    dq      vm_run.op_udiv              ; OP_UDIV
+    dq      vm_run.op_umod              ; OP_UMOD
+    dq      vm_run.op_binary            ; OP_USHR
+    dq      vm_run.op_binary            ; OP_ULT
+    dq      vm_run.op_binary            ; OP_UGT
+    dq      vm_run.op_binary            ; OP_ULE
+    dq      vm_run.op_binary            ; OP_UGE
     dq      vm_run.op_neg               ; OP_NEG
     dq      vm_run.op_not               ; OP_NOT
     dq      vm_run.op_bnot              ; OP_BNOT
@@ -357,6 +386,7 @@ vm_table:
     dq      vm_run.op_storel            ; OP_STOREL
     dq      vm_run.op_call              ; OP_CALL
     dq      vm_run.op_ret               ; OP_RET
+    dq      vm_run.op_conv              ; OP_CONV
 
 ; Indexed by opcode minus OP_BIN_FIRST, which is the same order the tokens
 ; came in -- so this table, op_table in op.asm and the row in mode.asm are all
@@ -379,6 +409,13 @@ op_routines:
     dq      op_and                      ; OP_AND
     dq      op_xor                      ; OP_XOR
     dq      op_or                       ; OP_OR
+    dq      op_udiv                     ; OP_UDIV
+    dq      op_umod                     ; OP_UMOD
+    dq      op_ushr                     ; OP_USHR
+    dq      op_ult                      ; OP_ULT
+    dq      op_ugt                      ; OP_UGT
+    dq      op_ule                      ; OP_ULE
+    dq      op_uge                      ; OP_UGE
 
 ; ---------------------------------------------------------------------------
     section .bss

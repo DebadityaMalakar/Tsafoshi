@@ -19,11 +19,14 @@
     global  tok_kind
     global  tok_val
     global  tok_pos
+    global  tok_type
 
     extern  name_intern
     extern  str_intern
+    extern  str_escape
     extern  err_unterminated
     extern  err_unterminatedcomment
+    extern  err_badchar
 
     section .text
 
@@ -107,6 +110,8 @@ lex_next:
     jz      .eof
     cmp     al, '"'
     je      .string
+    cmp     al, 39                      ; a single quote
+    je      .charconst
     cmp     al, '0'
     jb      .punct
     cmp     al, '9'
@@ -149,23 +154,163 @@ lex_next:
     mov     [tok_kind], rax
     ret
 
+;
+; Three bases, because C has three and a header full of 0x1f is not an exotic
+; case. The leading zero does double duty exactly as it does in C: on its own
+; it is the number zero, and in front of digits it is octal.
 .number:
     xor     eax, eax                    ; wraps silently on overflow for now
+    cmp     byte [rdi], '0'
+    jne     .digits
+    movzx   ecx, byte [rdi + 1]
+    or      ecx, 32
+    cmp     cl, 'x'
+    je      .hex
+    jmp     .octal
+
 .digits:
     movzx   ecx, byte [rdi]
     cmp     cl, '0'
-    jb      .number_done
+    jb      .suffix
     cmp     cl, '9'
-    ja      .number_done
+    ja      .suffix
     sub     ecx, '0'
     imul    rax, rax, 10
     add     rax, rcx
     inc     rdi
     jmp     .digits
+
+.octal:
+    movzx   ecx, byte [rdi]
+    cmp     cl, '0'
+    jb      .suffix
+    cmp     cl, '7'
+    ja      .suffix
+    sub     ecx, '0'
+    shl     rax, 3
+    add     rax, rcx
+    inc     rdi
+    jmp     .octal
+
+.hex:
+    add     rdi, 2
+.hex_more:
+    movzx   ecx, byte [rdi]
+    call    hex_digit
+    cmp     ecx, -1
+    je      .suffix
+    shl     rax, 4
+    add     rax, rcx
+    inc     rdi
+    jmp     .hex_more
+
+; The suffixes, and then the one rule that decides a literal's type: it is the
+; narrowest of the types its suffix allows that can actually hold it. Which is
+; why 2147483648 is a long without anyone writing an L, and 42 is not.
+;
+; r9 = "u" was written, r10 = how many "l"s were
+.suffix:
+    xor     r9d, r9d
+    xor     r10d, r10d
+.suffix_more:
+    movzx   ecx, byte [rdi]
+    or      ecx, 32
+    cmp     cl, 'u'
+    je      .suffix_u
+    cmp     cl, 'l'
+    je      .suffix_l
+    jmp     .suffix_done
+.suffix_u:
+    mov     r9d, 1
+    inc     rdi
+    jmp     .suffix_more
+.suffix_l:
+    inc     r10d
+    inc     rdi
+    jmp     .suffix_more
+
+.suffix_done:
+    mov     rcx, rax
+    test    r9d, r9d
+    jnz     .lit_unsigned
+    test    r10d, r10d
+    jnz     .lit_long
+    movsxd  rdx, ecx
+    cmp     rdx, rcx
+    jne     .lit_long
+    mov     edx, TY_INT
+    jmp     .number_done
+.lit_long:
+    mov     edx, TY_LONG
+    jmp     .number_done
+.lit_unsigned:
+    test    r10d, r10d
+    jnz     .lit_ulong
+    mov     edx, ecx
+    cmp     rdx, rcx
+    jne     .lit_ulong
+    mov     edx, TY_UINT
+    jmp     .number_done
+.lit_ulong:
+    mov     edx, TY_ULONG
+
 .number_done:
     mov     [lex_cur], rdi
     mov     [tok_val], rax
+    mov     [tok_type], rdx
     mov     qword [tok_kind], TK_NUM
+    ret
+
+; A character constant is a number token and nothing else -- C99 gives it type
+; int, not char, and the interpreter has no reason to disagree. The closing
+; quote is found first so the escape decoder can be told where to stop, which
+; is what lets it be the same decoder a string literal uses.
+;
+; rsi = the first byte of the constant, rcx = the closing quote
+.charconst:
+    lea     rsi, [rdi + 1]
+    mov     rcx, rsi
+.char_find:
+    movzx   eax, byte [rcx]
+    test    al, al
+    jz      .bad_char
+    cmp     al, 39
+    je      .char_end
+    cmp     al, 92
+    jne     .char_step
+    inc     rcx
+    cmp     byte [rcx], 0
+    je      .bad_char
+.char_step:
+    inc     rcx
+    jmp     .char_find
+
+.char_end:
+    cmp     rsi, rcx
+    je      .bad_char                   ; "''" stands for nothing
+    lea     rdx, [rcx + 1]
+    mov     [lex_cur], rdx
+    movzx   eax, byte [rsi]
+    cmp     al, 92
+    je      .char_escape
+    movsx   rax, al
+    jmp     .char_done
+.char_escape:
+    lea     rdi, [rsi + 1]
+    mov     rsi, rcx
+    mov     rdx, [tok_pos]
+    call    str_escape
+    movsx   rax, al
+.char_done:
+    mov     [tok_val], rax
+    mov     qword [tok_type], TY_INT
+    mov     qword [tok_kind], TK_NUM
+    ret
+.bad_char:
+    mov     [lex_cur], rcx
+    mov     rdi, [tok_pos]
+    call    err_badchar
+    mov     qword [tok_kind], TK_BAD
     ret
 
 ; rsi = where the name starts; the interning is names.asm's problem.
@@ -224,6 +369,7 @@ lex_next:
     mov     rdx, [tok_pos]
     call    str_intern
     mov     [tok_val], rax
+    mov     qword [tok_type], TY_LONG   ; an address, until pointers exist
     mov     qword [tok_kind], TK_STR
     ret
 .unterminated:
@@ -236,6 +382,26 @@ lex_next:
 .eof:
     mov     [lex_cur], rdi
     mov     qword [tok_kind], TK_EOF
+    ret
+
+; cl = character -> ecx = its value as a hexadecimal digit, or -1
+hex_digit:
+    cmp     cl, '0'
+    jb      .no
+    cmp     cl, '9'
+    jbe     .decimal
+    or      ecx, 32
+    cmp     cl, 'a'
+    jb      .no
+    cmp     cl, 'f'
+    ja      .no
+    sub     ecx, 'a' - 10
+    ret
+.decimal:
+    sub     ecx, '0'
+    ret
+.no:
+    mov     ecx, -1
     ret
 
 ; al = character -> eax = 1 if it may begin an identifier. Underscore sits
@@ -322,4 +488,6 @@ tok_kind:
 tok_val:
     resq    1
 tok_pos:
+    resq    1
+tok_type:
     resq    1

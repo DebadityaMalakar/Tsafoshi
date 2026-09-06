@@ -137,7 +137,7 @@ slot_text:
 ; ---------------------------------------------------------------------------
     section .data
 
-; The keywords, in TK_IF .. TK_VOID order, then the builtins in BI_ order.
+; The keywords, in TK_IF .. TK_UNSIGNED order, then the builtins in BI_ order.
 ; Zero ends it. This list, the TK_/BI_ constants in tsafoshi.inc and the table
 ; in builtin.asm are the same fact stated three times; KW_COUNT and BI_COUNT
 ; are what keep them honest.
@@ -162,15 +162,36 @@ k_break:
 k_continue:
     db      "continue"
 .len                equ $ - k_continue
-k_int:
-    db      "int"
-.len                equ $ - k_int
 k_return:
     db      "return"
 .len                equ $ - k_return
+k_sizeof:
+    db      "sizeof"
+.len                equ $ - k_sizeof
 k_void:
     db      "void"
 .len                equ $ - k_void
+k_bool:
+    db      "_Bool"
+.len                equ $ - k_bool
+k_char:
+    db      "char"
+.len                equ $ - k_char
+k_short:
+    db      "short"
+.len                equ $ - k_short
+k_int:
+    db      "int"
+.len                equ $ - k_int
+k_long:
+    db      "long"
+.len                equ $ - k_long
+k_signed:
+    db      "signed"
+.len                equ $ - k_signed
+k_unsigned:
+    db      "unsigned"
+.len                equ $ - k_unsigned
 b_printf:
     db      "printf"
 .len                equ $ - b_printf
@@ -193,9 +214,16 @@ reserved:
     dq      k_for, k_for.len
     dq      k_break, k_break.len
     dq      k_continue, k_continue.len
-    dq      k_int, k_int.len
     dq      k_return, k_return.len
+    dq      k_sizeof, k_sizeof.len
     dq      k_void, k_void.len
+    dq      k_bool, k_bool.len
+    dq      k_char, k_char.len
+    dq      k_short, k_short.len
+    dq      k_int, k_int.len
+    dq      k_long, k_long.len
+    dq      k_signed, k_signed.len
+    dq      k_unsigned, k_unsigned.len
     dq      b_printf, b_printf.len
     dq      b_argc, b_argc.len
     dq      b_argv, b_argv.len

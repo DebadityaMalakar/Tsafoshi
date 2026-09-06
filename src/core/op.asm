@@ -32,19 +32,38 @@
     global  op_and
     global  op_xor
     global  op_or
+    global  op_udiv
+    global  op_umod
+    global  op_ushr
+    global  op_ult
+    global  op_ugt
+    global  op_ule
+    global  op_uge
 
     extern  err_divzero
 
     section .text
 
 ; rdi = lhs, rsi = rhs, rdx = operator token kind, rcx = position for
-; diagnostics -> rax
+; diagnostics, r8 = 1 if the operands are unsigned -> rax
+;
+; Two tables rather than a flag inside each routine, because seven of the
+; sixteen operators change meaning with signedness and nine do not: addition,
+; multiplication, subtraction, the bitwise three, a left shift and the two
+; equalities produce the same bits whatever the operands are called. The two
+; tables share those nine entries, which is the fact stated as a table rather
+; than as a comment.
 op_apply:
     sub     rdx, TK_OP_FIRST
     cmp     rdx, TK_VAL_LAST - TK_OP_FIRST
     ja      .bad
-    lea     r8, [op_table]
-    jmp     [r8 + rdx * 8]
+    test    r8, r8
+    jnz     .unsigned
+    lea     r9, [op_table]
+    jmp     [r9 + rdx * 8]
+.unsigned:
+    lea     r9, [op_utable]
+    jmp     [r9 + rdx * 8]
 .bad:
     xor     eax, eax
     ret
@@ -132,8 +151,9 @@ op_shl:
     shl     rax, cl
     ret
 
-; Arithmetic, not logical: every cell is a signed 64-bit value until stage 3
-; brings types, so ">>" has to keep the sign it was given.
+; Arithmetic, not logical: this is the signed shift, and op_ushr below is the
+; other one. Which of the two an expression gets is decided by the parser from
+; the type of the left operand, which is exactly what C99 says decides it.
 op_shr:
     mov     rax, rdi
     mov     rcx, rsi
@@ -173,6 +193,54 @@ op_ne:
     setne   al
     ret
 
+; The unsigned seven. div and mod become the other instruction entirely; the
+; shift becomes logical rather than arithmetic; and the four inequalities read
+; a different pair of flags, which is the whole of what "unsigned" means to a
+; comparison.
+op_udiv:
+    test    rsi, rsi
+    jz      op_div.divzero
+    xor     edx, edx
+    mov     rax, rdi
+    div     rsi
+    ret
+
+op_umod:
+    test    rsi, rsi
+    jz      op_div.divzero
+    xor     edx, edx
+    mov     rax, rdi
+    div     rsi
+    mov     rax, rdx
+    ret
+
+op_ushr:
+    mov     rax, rdi
+    mov     rcx, rsi
+    shr     rax, cl
+    ret
+
+op_ult:
+    xor     eax, eax
+    cmp     rdi, rsi
+    setb    al
+    ret
+op_ugt:
+    xor     eax, eax
+    cmp     rdi, rsi
+    seta    al
+    ret
+op_ule:
+    xor     eax, eax
+    cmp     rdi, rsi
+    setbe   al
+    ret
+op_uge:
+    xor     eax, eax
+    cmp     rdi, rsi
+    setae   al
+    ret
+
 op_and:
     mov     rax, rdi
     and     rax, rsi
@@ -204,6 +272,27 @@ op_table:
     dq      op_gt                       ; TK_GT
     dq      op_le                       ; TK_LE
     dq      op_ge                       ; TK_GE
+    dq      op_eq                       ; TK_EQ
+    dq      op_ne                       ; TK_NE
+    dq      op_and                      ; TK_AMP
+    dq      op_xor                      ; TK_CARET
+    dq      op_or                       ; TK_PIPE
+
+; The same list with the seven that differ swapped out. Nine of the sixteen
+; entries are deliberately identical to the row above.
+    align   8
+op_utable:
+    dq      op_mul                      ; TK_STAR
+    dq      op_udiv                     ; TK_SLASH
+    dq      op_umod                     ; TK_PERCENT
+    dq      op_add                      ; TK_PLUS
+    dq      op_sub                      ; TK_MINUS
+    dq      op_shl                      ; TK_SHL
+    dq      op_ushr                     ; TK_SHR
+    dq      op_ult                      ; TK_LT
+    dq      op_ugt                      ; TK_GT
+    dq      op_ule                      ; TK_LE
+    dq      op_uge                      ; TK_GE
     dq      op_eq                       ; TK_EQ
     dq      op_ne                       ; TK_NE
     dq      op_and                      ; TK_AMP

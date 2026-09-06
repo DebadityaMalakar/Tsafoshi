@@ -65,6 +65,9 @@ TK_BAD              equ 31
 ; Keywords. A keyword is an identifier the lexer recognises by its interned
 ; slot: names_init puts them in the first slots, so the test is one compare
 ; against a constant and the token kind is that slot plus a base.
+; The type specifiers are last and contiguous, so "does a declaration start
+; here" is one range check rather than a list of compares -- which matters
+; because that question is asked at the top of every statement.
 TK_KW_FIRST         equ 32
 TK_IF               equ 32
 TK_ELSE             equ 33
@@ -73,9 +76,19 @@ TK_DO               equ 35
 TK_FOR              equ 36
 TK_BREAK            equ 37
 TK_CONTINUE         equ 38
-TK_INT              equ 39
-TK_RETURN           equ 40
+TK_RETURN           equ 39
+TK_SIZEOF           equ 40
 TK_VOID             equ 41
+TK_BOOL             equ 42
+TK_CHAR             equ 43
+TK_SHORT            equ 44
+TK_INT              equ 45
+TK_LONG             equ 46
+TK_SIGNED           equ 47
+TK_UNSIGNED         equ 48
+
+TK_SPEC_FIRST       equ TK_VOID
+TK_SPEC_LAST        equ TK_UNSIGNED
 
 TK_OP_FIRST         equ TK_STAR         ; the whole precedence-carrying class
 TK_OP_LAST          equ TK_OROR
@@ -120,6 +133,8 @@ NT_CONTINUE         equ 17
 NT_EMPTY            equ 18
 NT_RETURN           equ 19
 NT_INVOKE           equ 20
+NT_CONV             equ 21
+NT_COUNT            equ 22
 
 ; AST node layout. Five cells; see "The 64-bit cell rule". The three pointer
 ; slots are reused rather than widened, so every node stays the same size:
@@ -144,17 +159,22 @@ NT_INVOKE           equ 20
 ; NT_BREAK  NT_CONTINUE  NT_EMPTY   carry nothing but a position
 ; NT_RETURN   LHS = the value expression or zero
 ; NT_INVOKE   VAL = function id, LHS = argument chain, RHS = argument count
+; NT_CONV     VAL = the type to convert to, LHS = the value
 ;
 ; NT_VAR, NT_ASSIGN and NT_DECL keep one more thing in RHS: whether the slot
 ; in VAL is a global cell or an offset into the current call frame. It is the
 ; one bit of a variable's identity that survives the parser, because it is the
 ; one the engines cannot work out for themselves.
+; And every expression node carries its type, because C decides what an
+; operator means from the types of its operands and the parser is the only
+; pass that still knows them. A statement's type slot is never read.
 NODE_KIND           equ 0
 NODE_VAL            equ CELL
 NODE_LHS            equ CELL * 2
 NODE_RHS            equ CELL * 3
 NODE_POS            equ CELL * 4
-NODE_SIZE           equ CELL * 5
+NODE_TYPE           equ CELL * 5
+NODE_SIZE           equ CELL * 6
 
 AST_CAP             equ 16384           ; nodes at once, then "too complex"
 
@@ -165,7 +185,7 @@ NAME_LEN            equ 32              ; bytes per name, NUL included
 
 ; Keywords and builtin functions occupy the first name slots, interned before
 ; any input is read, so recognising either is a compare against a constant.
-KW_COUNT            equ 10              ; TK_IF .. TK_VOID
+KW_COUNT            equ 17              ; TK_IF .. TK_UNSIGNED
 
 ; The builtins. Each is a name the session cannot rebind and a routine inside
 ; this binary, and the table in builtin.asm gives every one of them the same
@@ -203,6 +223,40 @@ CLI_EVAL            equ 2               ; -e, one submission spelled inline
 CLI_STDIN           equ 3               ; "-", or a pipe with no terminal
 
 ARGV_PROG           equ 32              ; arguments a program can be given
+
+; The integer types. A type is a small number and everything else about it --
+; its width, whether it is signed, the name it prints under -- is a row in a
+; table in types.asm. They are ordered by conversion rank, which is what makes
+; "which of these two wins" a comparison rather than a matrix.
+;
+; The cell rule is unchanged and this is what makes it work: a cell is always
+; 64 bits, and a value in one is always the value of its type extended to that
+; width -- sign-extended if the type is signed, zero-extended if it is not. So
+; the type says how to narrow on the way in, and nothing has to ask again on
+; the way out.
+TY_VOID             equ 0
+TY_BOOL             equ 1
+TY_CHAR             equ 2               ; plain char, signed on both targets
+TY_SCHAR            equ 3
+TY_UCHAR            equ 4
+TY_SHORT            equ 5
+TY_USHORT           equ 6
+TY_INT              equ 7
+TY_UINT             equ 8
+TY_LONG             equ 9
+TY_ULONG            equ 10
+TY_COUNT            equ 11
+
+; The type specifier keywords, as a set, so "unsigned long int" can be seen in
+; any order and judged once at the end.
+SP_VOID             equ 1
+SP_BOOL             equ 2
+SP_CHAR             equ 4
+SP_SHORT            equ 8
+SP_INT              equ 16
+SP_LONG             equ 32
+SP_SIGNED           equ 64
+SP_UNSIGNED         equ 128
 
 ; Functions, and the managed C stack their locals live on.
 FUNC_CAP            equ 128             ; functions per session
@@ -243,24 +297,39 @@ OP_AND              equ 15
 OP_XOR              equ 16
 OP_OR               equ 17
 
-OP_NEG              equ 18
-OP_NOT              equ 19
-OP_BNOT             equ 20
-OP_POP              equ 21
-OP_LOAD             equ 22              ; 4-byte storage slot
-OP_STORE            equ 23              ; 4-byte storage slot, value stays
-OP_STR              equ 24              ; 4-byte offset into the string arena
-OP_BI               equ 25              ; 4-byte builtin, count, column
-OP_JMP              equ 26              ; 4-byte target
-OP_JZ               equ 27              ; pops, jumps if it was zero
-OP_JNZ              equ 28              ; pops, jumps if it was not
-OP_LOADL            equ 29              ; 4-byte frame offset
-OP_STOREL           equ 30              ; 4-byte frame offset, value stays
-OP_CALL             equ 31              ; 4-byte function id
-OP_RET              equ 32              ; the value is on top of the stack
-OP_COUNT            equ 33
+; Seven of the sixteen mean something different when their operands are
+; unsigned, and only seven: addition, multiplication and the bitwise operators
+; produce the same bits either way, and so does a left shift. These are the
+; ones that do not, and they sit immediately after the signed block so that
+; one contiguous range still covers every binary opcode.
+OP_UDIV             equ 18              ; 4-byte source column
+OP_UMOD             equ 19              ; 4-byte source column
+OP_USHR             equ 20
+OP_ULT              equ 21
+OP_UGT              equ 22
+OP_ULE              equ 23
+OP_UGE              equ 24
+
+OP_NEG              equ 25
+OP_NOT              equ 26
+OP_BNOT             equ 27
+OP_POP              equ 28
+OP_LOAD             equ 29              ; 4-byte storage slot
+OP_STORE            equ 30              ; 4-byte storage slot, value stays
+OP_STR              equ 31              ; 4-byte offset into the string arena
+OP_BI               equ 32              ; 4-byte builtin, count, column
+OP_JMP              equ 33              ; 4-byte target
+OP_JZ               equ 34              ; pops, jumps if it was zero
+OP_JNZ              equ 35              ; pops, jumps if it was not
+OP_LOADL            equ 36              ; 4-byte frame offset
+OP_STOREL           equ 37              ; 4-byte frame offset, value stays
+OP_CALL             equ 38              ; 4-byte function id
+OP_RET              equ 39              ; the value is on top of the stack
+OP_CONV             equ 40              ; 4-byte type: narrow, then re-extend
+OP_COUNT            equ 41
 
 OP_BIN_FIRST        equ OP_MUL          ; mirrors TK_OP_FIRST .. TK_VAL_LAST
+OP_BIN_LAST         equ OP_UGE          ; and then the unsigned seven
 
 CODE_CAP            equ 65536           ; bytes of bytecode per line
 VM_STACK_CAP        equ 1024            ; cells on the operand stack

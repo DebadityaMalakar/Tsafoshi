@@ -102,8 +102,8 @@ assistance, not as reviewed, production-grade work.
 | **2.2** | `if` / `while` / `for` / `do`, jumps, blocks and scope | **done** |
 | **2.3** | The VM call stack, user-defined functions, running a `.c` file | **done** |
 | **3.1** | A proper command line: flags, `argv`, exit status, a REPL that knows it is one | **done** |
-| 3.2 | Types: `char`, `int`, `long`, `_Bool`, `sizeof`, conversions, typed opcodes | next |
-| 3.3 | Pointers and arrays: `&`, `*`, subscripting, pointer arithmetic, real strings | |
+| **3.2** | Types: `char`, `short`, `int`, `long`, `_Bool`, `signed` / `unsigned`, `sizeof`, casts, conversions, typed opcodes | **done** |
+| 3.3 | Pointers and arrays: `&`, `*`, subscripting, pointer arithmetic, real strings | next |
 | 3.4 | `struct` and `union`, member access, passing and returning them | |
 | 4 | Native call bridge — real libc behind the builtins | |
 | 5 | Preprocessor: `#include` (standard headers ignored, user `.c` files included once), `#define`, `#if`, `__VA_ARGS__` | |
@@ -125,7 +125,8 @@ What choosing C99 specifically commits us to, beyond C89:
 | `//` comments | lexer, **done** at stage 2.2 |
 | Declarations anywhere in a block, and in `for` init | parser + scoping, **done** at stage 2.2 |
 | `int main(void)` as the entry point of a file | **done** at stage 2.3 |
-| `long long`, `_Bool`, `<stdbool.h>`, `<stdint.h>` | type system, stage 3 |
+| `long long`, `_Bool` | type system, **done** at stage 3.2 |
+| `<stdbool.h>`, `<stdint.h>` | the preprocessor, stage 5 |
 | Designated initializers, compound literals | stage 6 |
 | Flexible array members | stage 6 |
 | Variadic macros (`__VA_ARGS__`) | preprocessor, stage 5 |
@@ -164,12 +165,27 @@ apart:
 | A slot on the evaluation stack | always `CELL` (8 bytes) |
 | A C object in memory — struct field, array element, global | its real C width |
 
-So `sizeof(int)` is 4 and `int a[10]` is 40 bytes, even though loading `a[3]`
-puts it in a 64-bit cell. Typed opcodes bridge the two: `LOAD_I32` sign-extends
-4 bytes of memory into a full cell, `STORE_I32` truncates a cell back down to 4
-bytes, and `ADD_I32` wraps its result at 32 bits before leaving it in the
-64-bit slot. Widening on the stack must never become widening in the semantics
-— `INT_MAX + 1` still has to land on `INT_MIN`.
+So `sizeof(int)` is 4 and `int a[10]` will be 40 bytes, even though loading
+`a[3]` puts it in a 64-bit cell.
+
+Stage 3.2 bridged the two, and did it with **one invariant rather than a family
+of typed opcodes**:
+
+> A cell always holds its type's value, extended to 64 bits — sign-extended
+> when the type is signed, zero-extended when it is not.
+
+Which means narrowing happens exactly once, at the moment a value is produced
+or stored, and nothing downstream ever has to ask how wide a thing really is.
+`char c = 300` stores 44 because a `conv` node sits in front of the store;
+`c + 1` is 45 because what was loaded was already 44. `INT_MAX + 1` lands on
+`INT_MIN` because the `add` is followed by a `conv int`, not because `add`
+knows anything about ints.
+
+That is why there is no `add_i32`. There is one `add`, and a `conv` after it
+where the result is narrower than a cell. Seven opcodes did have to be doubled
+— the ones where signedness genuinely changes the instruction — and nine did
+not, which the tables in `op.asm` say out loud by repeating the same nine
+entries twice.
 
 ### Other standing assumptions
 
@@ -182,42 +198,62 @@ shortcuts, and all of them are revisable:
   checking. A bad pointer in interpreted code faults the interpreter.
 - **One flat memory region** for globals, the managed C stack and the heap.
 - **`char` is signed**, and 8 bits. Plain `int` is 32 bits, `long` and pointers
-  are 64.
+  are 64. `long long` is accepted and is the same 8 bytes as `long`, which is a
+  real C99 type this interpreter cannot tell apart from another one.
+- **Duplicate type specifiers are not diagnosed.** `short short x` is accepted
+  and means `short`. A repeated `long` does count, because `long long` has to.
 - **Little-endian x86-64 only.** Byte order is assumed, not abstracted.
 - **No floating point yet.** Deferred until the integer language is complete.
 
 ## Build and run
 
-Needs [NASM](https://www.nasm.us/) and a linker. There is no Makefile and no
-CMake — the build is a file list and one link step.
-
-**Linux**
+Needs [NASM](https://www.nasm.us/) and a linker. No CMake and no configure
+step: the build is a file list, an object format and one link.
 
 ```sh
-./run.sh                    # format, build, then start the REPL
-./run.sh --build            # format and build only
-./run.sh --check            # fail if any source is unformatted (CI)
-./run.sh --clean            # rm -rf build/
-./run.sh examples/gcd.c     # anything else goes to the interpreter
-echo "1 + 2 * 3" | ./run.sh -i
+make                        # format, build, then start a session
+make build                  # format and build only
+make check                  # fail if any source is unformatted (CI)
+make test                   # run both engines over the corpus and diff them
+make examples               # run every example
+make run FILE=examples/gcd.c ARGS="a b"
+make clean
 ```
 
-**Windows**
+**Three lines vary by platform** — the object format, the link step, and which
+of `src/linux` and `src/windows` joins the build. Everything else is shared,
+because the interpreter is: there is no conditional assembly anywhere in the
+tree, and the Makefile is what makes that possible rather than what works
+around it.
 
-```bat
-run.bat
-run.bat --build
-run.bat --check
-run.bat --clean
+The target is detected from `uname` and can be overridden, which is how you
+cross-build from WSL:
+
+```sh
+make PLATFORM=windows       # win64 objects, lld-link, src/windows
+make PLATFORM=linux         # elf64 objects, ld, src/linux
 ```
 
-`run.bat` assembles with NASM and links with whichever of `lld-link` (LLVM),
-`link.exe` (MSVC), `gcc` (mingw-w64) or `GoLink` it finds first. The first
-three also need `kernel32.lib` from the Windows SDK, which the script locates
-automatically.
+Objects live under `build/<platform>/`, because the two targets share every
+filename and nothing else — a win64 `main.o` and an elf64 `main.o` cannot be
+told apart by a timestamp, and switching targets in one tree would otherwise
+link yesterday's format.
 
-Both scripts run `tools/prettier.py` over `src/` before assembling, if Python
-is available.
+`make` needs a POSIX shell, which Linux, WSL, MSYS2 and Git Bash all have. The
+one environment it cannot serve is native `cmd`, so **`run.bat` is still there
+and still standalone**: it assembles with NASM and links with whichever of
+`lld-link` (LLVM), `link.exe` (MSVC), `gcc` (mingw-w64) or `GoLink` it finds,
+the first three also wanting `kernel32.lib` from the Windows SDK, which it
+locates itself. `run.sh` is now a five-line shim over `make`.
+
+Both routes run `tools/prettier.py` over the sources before assembling, so the
+tree is never committed in a shape it was not formatted in.
+
+`make test` is the one worth knowing about. There is no file of expected
+answers: the two engines are each other's oracle, so the test is that the tree
+walker and the bytecode VM produce **the same output** for every line of
+`tests/corpus.txt`. The day they disagree, one of them has a bug and the diff
+says where.
 
 ## Using it
 
@@ -257,7 +293,7 @@ The full C99 ladder below assignment, minus the ones that need types:
 |---|---|---|
 | 10 | `*` `/` `%` | |
 | 9 | `+` `-` | |
-| 8 | `<<` `>>` | `>>` is arithmetic; every cell is signed until stage 3 |
+| 8 | `<<` `>>` | `>>` is arithmetic on a signed left operand and logical on an unsigned one |
 | 7 | `<` `>` `<=` `>=` | yield `1` or `0`, as C says |
 | 6 | `==` `!=` | |
 | 5 | `&` | |
@@ -266,9 +302,12 @@ The full C99 ladder below assignment, minus the ones that need types:
 | 2 | `&&` | short-circuits |
 | 1 | `\|\|` | short-circuits |
 
-Prefix `-` `+` `!` `~`, and parentheses. Values are 64-bit signed and wrap
-silently on overflow. A shift count outside 0..63 is undefined behaviour in
-C99; here it is what the hardware does, which is to use the low six bits.
+Prefix `-` `+` `!` `~`, parentheses, casts, and `sizeof`. Since stage 3.2 the
+type of the operands decides which of two machine operations an operator
+actually is — `/`, `%`, `>>` and the four inequalities all differ between
+signed and unsigned — and the result wraps at the width of its own type rather
+than at 64 bits. A shift count outside the width is undefined behaviour in C99;
+here it is what the hardware does, which is to use the low six bits.
 
 `&&` and `||` are the only two operators with no opcode behind them. Both
 operands would have to be values before `op.asm` could be handed them, and
@@ -285,7 +324,7 @@ Every command starts with a colon:
 | `:mode`, `:mode <name>` | report or change the evaluation order |
 | `:engine`, `:engine tree`, `:engine bytecode` | which engine runs a line |
 | `:dis` | toggle the bytecode listing |
-| `:vars` | every variable and its value |
+| `:vars` | every variable, its type and its value |
 | `:help` | the list above |
 | `:quit`, `:exit`, `:q`, EOF | leave |
 
@@ -336,6 +375,159 @@ tsafoshi> 5 = 3
           ^
 error: left of '=' is not a variable
 ```
+
+
+## Types
+
+C's integer types, all of them, and the conversion rules that go with them:
+
+| | | |
+|---|---|---|
+| `_Bool` | 1 | not a truncation but a test — `b = 256` gives 1, not 0 |
+| `char` `signed char` `unsigned char` | 1 | three types, not two; plain `char` is signed here |
+| `short` `unsigned short` | 2 | |
+| `int` `unsigned int` | 4 | what everything narrower promotes to |
+| `long` `unsigned long` | 8 | `long long` is accepted and is the same type |
+
+The specifiers may arrive in any order, because C says they may:
+`unsigned long int`, `long unsigned`, and `int long unsigned` are one type
+written three ways. They are collected into a set and judged once, at the end,
+which is the whole of `specifier.asm`.
+
+```
+tsafoshi> char c = 300; c
+= 44
+tsafoshi> unsigned u = -1; u
+= 4294967295
+tsafoshi> _Bool b = 256; b
+= 1
+tsafoshi> sizeof(long)
+= 8
+tsafoshi> (short)70000
+= 4464
+tsafoshi> 2147483647 + 1
+= -2147483648
+tsafoshi> :vars
+  char c = 44
+  unsigned int u = 4294967295
+  _Bool b = 1
+```
+
+Literals carry a type too. `42` is an `int`; `2147483648` is a `long` because
+it has to be; `10u`, `10L` and `10UL` are what they say. Hexadecimal and octal
+arrived with them, so `0x1f` is 31 and `017` is 15. So did character
+constants — `'A'` is 65, of type `int`, exactly as C99 says.
+
+### Where the rules run
+
+**All of it happens in the parser and none of it happens later.** By the time
+either engine sees a tree, every conversion C99 asks for is already an explicit
+node in it, and every operator has already been told whether it is the signed
+one or the unsigned one.
+
+That is the same trick `scope.asm` plays with names, for the same reason: the
+parser is the last pass that knows, so it is the pass that decides, and what it
+hands on is an answer rather than a question. Neither engine knows what a type
+is. `vm.asm` has no idea `char` exists.
+
+```
+tsafoshi> :dis
+tsafoshi> char c = 3; c + 1
+    0000  push   3
+    0009  conv   char
+    0014  store  c
+    0019  pop
+    0020  load   c
+    0025  conv   int
+    0030  push   1
+    0039  add
+    0040  conv   int
+    0045  halt
+= 4
+```
+
+Read it as the rules being made visible. `conv char` is the narrowing that
+makes 300 into 44. `conv int` on the loaded `c` is the integer promotion —
+`char + int` is not char arithmetic, it is int arithmetic. And `conv int` after
+the `add` is the result wrapping at *its* width rather than at the cell's,
+which is what keeps `INT_MAX + 1` landing on `INT_MIN`.
+
+### Which one wins
+
+The usual arithmetic conversions, in full, and they collapse to two lines once
+the promotions have run — because everything narrower than `int` has already
+become one:
+
+- at equal rank the **unsigned** type wins, so `int` against `unsigned int`
+  is `unsigned int`;
+- otherwise the **wider** one does, so `unsigned int` against `long` is `long`
+  — a `long` is genuinely wide enough to hold every `unsigned int`, which is
+  the condition the standard actually states.
+
+The consequence is the one that catches people in real C, and it catches people
+here too:
+
+```
+tsafoshi> int i = -1; unsigned u = 1; i < u
+= 0
+```
+
+`-1` is not less than `1`, because `i` became `4294967295` before the
+comparison happened. That is not a bug being reproduced for fun; it is the
+language, and an interpreter that quietly got it "right" would be lying about
+what the same code does when compiled.
+
+### The shift is the exception
+
+Every other binary operator converts both operands to a common type. A shift
+does not: C99 promotes each side on its own and the result is the **left**
+operand's type. Shifting is not symmetric, and pretending it were would make
+`1L << n` depend on what `n` happened to be declared as.
+
+```
+tsafoshi> -8 >> 1
+= -4
+tsafoshi> (unsigned)-8 >> 1
+= 2147483644
+```
+
+Same bits, same shift count, two different instructions — `sar` and `shr` —
+chosen by the type of the thing being shifted.
+
+### Casts, `sizeof`, and `void`
+
+A cast is the explicit form of the conversion everything else does implicitly,
+so it is the same node: `(char)300` is 44 for exactly the reason `char c = 300`
+is.
+
+`sizeof` folds to a constant while parsing, in all three of its spellings —
+`sizeof(int)`, `sizeof(x)` and `sizeof x`. Its operand is never evaluated,
+because only its type was ever wanted. The answer has type `unsigned long`,
+which is what `size_t` is here.
+
+`void` is a type now rather than a keyword that only appears in two places, so
+a function can return one — and using that nothing as a value is an error with
+a caret under it:
+
+```
+$ tsafoshi -e 'void v(void) { return; } int x = v();'
+1 | void v(void) { return; } int x = v();
+                                     ^
+error: void has no value to use here
+```
+
+### Three files, because it is three jobs
+
+| | |
+|---|---|
+| `type.asm` | what a type **is** — one table: width, signedness, rank, name |
+| `convert.asm` | the **rules** — promotion, the common type, and narrowing a value |
+| `specifier.asm` | the **spelling** — which combinations of keywords name which type |
+
+The table is data that grows when a type is added; the rules are logic that
+does not; the spelling is neither. Adding `float` would touch all three, in
+three different ways, which is the argument for the split rather than against
+it.
 
 ## Control flow
 
@@ -485,7 +677,8 @@ against the first would still be pointing at it, and "the function I just fixed
 did not change" is a worse experience than being told to pick another name.
 
 Mutual recursion needs a way to declare a function without defining it, which
-is a prototype, which needs a type system. That is stage 3.
+is a prototype. The type system it needed arrived at stage 3.2; the prototype
+itself is still to come, and belongs with the declarator work in 3.3.
 
 ## The call stack
 
@@ -817,6 +1010,7 @@ where one is needed:
 | `push` | 8-byte immediate | push it |
 | `mul` `div` `mod` `add` `sub` | `div` and `mod` take a 4-byte column | pop two, push the result |
 | `shl` `shr` `lt` `gt` `le` `ge` `eq` `ne` `and` `xor` `or` | | likewise |
+| `udiv` `umod` `ushr` `ult` `ugt` `ule` `uge` | `udiv` and `umod` take a column | the seven that mean something else when the operands are unsigned |
 | `neg` `not` `bnot` | | rewrite the top in place |
 | `pop` | | discard the top |
 | `load` `store` | 4-byte storage slot | read a variable, or write one |
@@ -827,12 +1021,21 @@ where one is needed:
 | `loadl` `storel` | 4-byte frame offset | read or write a local, relative to the frame pointer |
 | `call` | 4-byte function | enter a frame, move the arguments into it, jump |
 | `ret` | | leave the frame; the value on top of the stack is the answer |
+| `conv` | 4-byte type | narrow the top of the stack to that type and extend it back out |
 
-The sixteen binary opcodes are numbered in token order, so the compiler turns
-an operator token into its opcode with a subtract and an add rather than a
-table lookup — and the VM, which still has the opcode in a register when the
+The sixteen signed binary opcodes are numbered in token order, so the compiler
+turns an operator token into its opcode with a subtract and an add rather than
+a table lookup — and the VM, which still has the opcode in a register when the
 handler is entered, indexes one table of `op.asm` routines with it. Sixteen
 operators, one arm of the dispatch loop.
+
+The seven unsigned ones sit immediately after them, so that one contiguous
+range still covers every binary opcode and the dispatch arm did not have to
+change. Which of the two an expression gets is a table lookup in the compiler,
+keyed on the left operand's type — and nine of the sixteen entries in that
+table are empty, because addition, multiplication, subtraction, the bitwise
+three, a left shift and the two equalities produce the same bits whatever the
+operands are called. That the table is mostly holes is the point of it.
 
 `store` leaves its value on the stack, because assignment is an expression;
 `pop` is what discards the values nobody wanted. Two invariants hold the whole
@@ -983,7 +1186,10 @@ src/
     vm.asm              the dispatch loop and its operand stack
     disasm.asm          bytecode -> a listing
     exec.asm            which engine runs, and the commands that switch it
-    op.asm              operator semantics (values)
+    op.asm              operator semantics (values), signed and unsigned
+    type.asm            what a type is: width, signedness, rank, name
+    convert.asm         promotion, the common type, and narrowing a value
+    specifier.asm       which combinations of keywords name which type
     vars.asm            global storage, the managed C stack, and ":vars"
     printf.asm          the format-string interpreter
     builtin.asm         the builtin table: printf, argc, argv, exit
@@ -994,7 +1200,11 @@ src/
   linux/readfile.asm    files and argv, Linux syscalls
   windows/input.asm     console I/O and isatty, Windows kernel32
   windows/readfile.asm  files and argv, Windows kernel32
+tests/corpus.txt        the lines the two engines are diffed over
 tools/prettier.py       source layout normalizer
+Makefile                the build, and the only file that names a platform
+run.bat                 the same build for native cmd, which has no make
+run.sh                  a shim over make, for muscle memory
 ```
 
 Start reading at `src/main.asm`. It is five instructions: hand the loader's
@@ -1026,6 +1236,10 @@ The build is `src/main.asm` plus `src/core/*.asm` plus exactly one
 | parser → func | `func_declare(name, arity)` before the body, `func_set_body` / `func_set_frame` after it |
 | engine → func | `func_arity` / `func_frame` / `func_entry` for the VM, `func_body` for the walker |
 | engine → builtin | `builtin_run(id, args, count, pos)` — one array of cells, whichever engine built it, and one signature for every builtin |
+| parser → specifier | `type_build(specifiers, longs)` — a set of keywords in, a type out, judged once |
+| parser → convert | `type_promote`, `type_common` — the rules that decide what an operator's operands become |
+| parser → type | `type_size`, `type_unsigned`, `type_rank`, `type_name` — the four questions, one table |
+| engine → convert | `type_convert(value, type)` — the only definition of what becoming a `char` does, called by both |
 | repl → cli | `cli_parse`, then `cli_kind` / `cli_text` / `cli_argc` — what was asked for, decided once, before anything is read |
 | compiler → code | `code_op` / `code_i64` / `code_u32` to write, and `code_jump` / `code_patch` for a jump whose target is not known yet |
 | compiler → vm | the code buffer in `code.asm`; neither module owns the memory, so `disasm.asm` reads it without either knowing |
@@ -1047,9 +1261,12 @@ opcode numbering and the VM's routine table all follow that order, so adding an
 operator means adding one line to each rather than reasoning about any of
 them.
 
-Every AST node is the same five cells whatever its kind — the three pointer
+Every AST node is the same six cells whatever its kind — the three pointer
 slots get reused rather than added to, so a `while` loop, an argument list and
-a binary operator all cost the same. `tsafoshi.inc` records which slot means
+a binary operator all cost the same. The sixth is the type, added at stage 3.2
+and read only for expressions; the alternative was packing it into the kind,
+and a node is cheap enough that hiding a field inside another one would have
+been the worse trade. `tsafoshi.inc` records which slot means
 what. Because the shape never varies, every constructor in `ast.asm` is the
 same routine with its arguments in a different order, which is exactly how it
 is written.
@@ -1060,11 +1277,9 @@ the scope the rule opens for it — which is also precisely what C99 says the
 scope of `for (int i = ...)` is, so the shortcut and the standard agree.
 
 Nodes come out of a bump-allocated arena that the REPL resets once per line,
-so a tree costs one pointer bump per node and nothing at all to free. Running
-out raises `expression too complex`; with `AST_CAP` at 4096 nodes and
-`LINE_CAP` at 1024 bytes a single line cannot actually reach it, so it is a
-guard for the multi-line input that arrives with the preprocessor rather than
-a limit you can hit today.
+so a tree costs one pointer bump per node and nothing at all to free. Running out raises `expression too complex`; `AST_CAP` is 16384 nodes, which a
+line typed at a prompt cannot reach but a `.c` file read in one submission
+could, so it is a real guard rather than a formality.
 
 ### The platform contract
 

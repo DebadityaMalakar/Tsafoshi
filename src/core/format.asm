@@ -7,12 +7,14 @@
     global  fmt_i64
     global  fmt_u64
     global  print_result
+    global  print_value
     global  write_spaces
     global  pad_spaces
     global  pad_zeros
 
     extern  sys_write_stdout
     extern  sys_write_stderr
+    extern  type_unsigned
 
     section .text
 
@@ -80,17 +82,50 @@ fmt_u64:
     sub     rdx, r8
     ret
 
-; rax = value
+; rax = value, rdi = its type.
+;
+; The type is what decides how the digits come out, and it has to: a cell
+; holding an unsigned int that came from -1 holds 4294967295, and printing that
+; as a signed 64-bit number would say -1 and be wrong about what the variable
+; actually contains.
+;
+; rbx = the value, r12 = its type
 print_result:
-    push    rax
+    push    rbx
+    push    r12
+    mov     rbx, rax
+    mov     r12, rdi
     lea     rsi, [msg_equals]
     mov     rdx, msg_equals.len
     call    sys_write_stdout
-    pop     rax
-    call    fmt_i64
-    call    sys_write_stdout
+    mov     rax, rbx
+    mov     rdi, r12
+    call    print_value
     lea     rsi, [msg_newline]
     mov     rdx, 1
+    call    sys_write_stdout
+    pop     r12
+    pop     rbx
+    ret
+
+; rax = value, rdi = its type. The digits and nothing else, so ":vars" and the
+; prompt can print the same value the same way without agreeing on a prefix.
+print_value:
+    push    rbx
+    mov     rbx, rax
+    call    type_unsigned
+    mov     rdi, rax
+    mov     rax, rbx
+    test    rdi, rdi
+    jnz     .unsigned
+    call    fmt_i64
+    jmp     .emit
+.unsigned:
+    mov     edi, 10
+    xor     esi, esi
+    call    fmt_u64
+.emit:
+    pop     rbx
     jmp     sys_write_stdout
 
 ; rdi = count, written to stderr in blocks

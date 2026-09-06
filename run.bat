@@ -1,10 +1,15 @@
 @echo off
 rem SPDX-License-Identifier: MIT
 rem
+rem The build is the Makefile; this is the one environment it cannot serve,
+rem because native cmd has neither make nor a POSIX shell to run its recipes.
+rem Anywhere with either -- Linux, WSL, MSYS2, Git Bash -- use make instead.
+rem
 rem   run.bat            format, build, then start the REPL
 rem   run.bat --build    format and build only
 rem   run.bat --check    fail if any source is unformatted (for CI)
 rem   run.bat --clean    remove build\
+rem   run.bat file.c     format, build, then run that
 rem
 rem Needs NASM plus one of: lld-link (LLVM), link.exe (MSVC), gcc (mingw-w64),
 rem GoLink. The first three also need kernel32.lib from the Windows SDK.
@@ -13,6 +18,7 @@ setlocal enabledelayedexpansion
 set "ROOT=%~dp0"
 set "CORE=%ROOT%src\core"
 set "OUT=%ROOT%build"
+set "OBJ=%OUT%\windows"
 set "BIN=%OUT%\tsafoshi.exe"
 
 set "PY="
@@ -40,13 +46,13 @@ if errorlevel 1 (
 
 if defined PY "!PY!" "%ROOT%tools\prettier.py" -q "%ROOT%src"
 
-if not exist "%OUT%" mkdir "%OUT%"
+if not exist "%OBJ%" mkdir "%OBJ%"
 
 set "OBJS="
 for %%F in ("%ROOT%src\main.asm" "%CORE%\*.asm" "%ROOT%src\windows\*.asm") do (
-    nasm -f win64 -g -I"%CORE%" "%%~fF" -o "%OUT%\%%~nF.obj"
+    nasm -f win64 -g -I"%CORE%" "%%~fF" -o "%OBJ%\%%~nF.obj"
     if errorlevel 1 exit /b 1
-    set "OBJS=!OBJS! "%OUT%\%%~nF.obj""
+    set "OBJS=!OBJS! "%OBJ%\%%~nF.obj""
 )
 
 rem newest installed SDK wins: the loop enumerates in version order

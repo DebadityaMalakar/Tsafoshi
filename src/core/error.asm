@@ -45,6 +45,10 @@
     global  err_toomanyfuncs
     global  err_stackfull
     global  err_nomain
+    global  err_badchar
+    global  err_badtype
+    global  err_voidvalue
+    global  err_notascalar
     global  err_codefull
     global  err_deep
     global  err_code
@@ -222,6 +226,22 @@ err_stackfull:
 err_nomain:
     lea     rsi, [e_nomain]
     mov     rdx, e_nomain.len
+    jmp     err_set
+err_badchar:
+    lea     rsi, [e_badchar]
+    mov     rdx, e_badchar.len
+    jmp     err_set
+err_badtype:
+    lea     rsi, [e_badtype]
+    mov     rdx, e_badtype.len
+    jmp     err_set
+err_voidvalue:
+    lea     rsi, [e_voidvalue]
+    mov     rdx, e_voidvalue.len
+    jmp     err_set
+err_notascalar:
+    lea     rsi, [e_notascalar]
+    mov     rdx, e_notascalar.len
     jmp     err_set
 
 ; These two are raised from inside the compiler and the VM, which are past the
@@ -455,8 +475,20 @@ e_expectedbrace:
     db      "expected '{'"
 .len                equ $ - e_expectedbrace
 e_expectedtype:
-    db      "expected 'int'"
+    db      "expected a type"
 .len                equ $ - e_expectedtype
+e_badchar:
+    db      "not a character constant"
+.len                equ $ - e_badchar
+e_badtype:
+    db      "not a type these words can spell"
+.len                equ $ - e_badtype
+e_voidvalue:
+    db      "void has no value to use here"
+.len                equ $ - e_voidvalue
+e_notascalar:
+    db      "this cannot be converted to that"
+.len                equ $ - e_notascalar
 e_argcount:
     db      "wrong number of arguments"
 .len                equ $ - e_argcount

@@ -40,7 +40,9 @@
     extern  scope_global_count
     extern  scope_global_name
     extern  scope_global_slot
-    extern  fmt_i64
+    extern  scope_global_type
+    extern  type_name
+    extern  print_value
     extern  err_stackfull
     extern  sys_write_stdout
 
@@ -164,6 +166,15 @@ vars_command:
     mov     rdx, t_indent.len
     call    sys_write_stdout
     mov     rdi, rbx
+    call    scope_global_type           ; the declaration, read back out
+    mov     rdi, rax
+    call    type_name
+    mov     rsi, rax
+    call    sys_write_stdout
+    lea     rsi, [t_space]
+    mov     rdx, 1
+    call    sys_write_stdout
+    mov     rdi, rbx
     call    scope_global_name
     mov     rdi, rax
     call    name_text
@@ -176,8 +187,12 @@ vars_command:
     call    scope_global_slot
     mov     rdi, rax
     call    var_get
-    call    fmt_i64
-    call    sys_write_stdout
+    push    rax
+    mov     rdi, rbx
+    call    scope_global_type
+    mov     rdi, rax
+    pop     rax
+    call    print_value
     lea     rsi, [t_newline]
     mov     rdx, 1
     call    sys_write_stdout
@@ -208,6 +223,8 @@ t_equals:
 .len                equ $ - t_equals
 t_newline:
     db      10
+t_space:
+    db      " "
 m_none:
     db      "  no variables yet", 10
 .len                equ $ - m_none

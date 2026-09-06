@@ -62,11 +62,13 @@
     global  parse_value
     global  parse_defined
     global  parse_defined_count
+    global  parse_type
 
     extern  lex_next
     extern  tok_kind
     extern  tok_val
     extern  tok_pos
+    extern  tok_type
     extern  mode_prec
     extern  mode_bump
     extern  ast_num
@@ -86,6 +88,17 @@
     extern  ast_leaf
     extern  ast_return
     extern  ast_invoke
+    extern  ast_conv
+    extern  ast_typed
+    extern  type_build
+    extern  type_size
+    extern  type_promote
+    extern  type_common
+    extern  func_type
+    extern  func_param
+    extern  func_set_param
+    extern  builtin_type
+    extern  builtin_param
     extern  func_declare
     extern  func_find
     extern  func_arity
@@ -120,6 +133,8 @@
     extern  err_expectedtype
     extern  err_argcount
     extern  err_toomanyfuncs
+    extern  err_badtype
+    extern  err_voidvalue
     extern  src_buf
 
 ; What a statement is allowed to be, where it appears.
@@ -227,8 +242,11 @@ parse_statement:
     je      .empty
     cmp     rax, TK_LBRACE
     je      .block
-    cmp     rax, TK_INT
-    je      .declaration
+    cmp     rax, TK_SPEC_FIRST          ; every declaration begins with one
+    jb      .not_declaration
+    cmp     rax, TK_SPEC_LAST
+    jbe     .declaration
+.not_declaration:
     cmp     rax, TK_IF
     je      .if
     cmp     rax, TK_WHILE
@@ -324,9 +342,10 @@ parse_statement:
     call    ast_leaf
     jmp     .out
 
-; "return" with no expression is "return 0" here, because every function is an
-; int function until stage 3 says otherwise and falling off the end of one
-; already means the same thing.
+; "return" with no expression is "return 0", which is what falling off the end
+; of a function already means. With one, the value becomes the function's
+; return type here rather than at the call site, because this is the last place
+; that knows what the function was declared to give back.
 .return:
     cmp     qword [func_depth], 0
     je      .not_in_function
@@ -337,6 +356,11 @@ parse_statement:
     cmp     qword [tok_kind], TK_SEMI
     je      .return_build
     call    parse_expression
+    cmp     qword [err_code], 0
+    jne     .return_failed
+    mov     rdi, rax
+    mov     rsi, [parse_ret_type]
+    call    coerce
     cmp     qword [err_code], 0
     jne     .return_failed
 .return_build:
@@ -456,7 +480,10 @@ parse_declaration:
     push    r15
     sub     rsp, 8
     mov     r13, rdi
-    call    lex_next
+    call    parse_type
+    cmp     rax, -1
+    je      .fail
+    mov     [decl_type], rax
     cmp     qword [tok_kind], TK_IDENT
     jne     .want_name
     mov     r14, [tok_val]
@@ -470,6 +497,7 @@ parse_declaration:
     mov     rdi, r14
     mov     rsi, r15
 .declarator:
+    mov     rdx, [decl_type]
     call    parse_declarator
     cmp     qword [err_code], 0
     jne     .fail
@@ -507,6 +535,7 @@ parse_declaration:
     jz      .nested
     mov     rdi, r14
     mov     rsi, r15
+    mov     rdx, [decl_type]
     call    parse_function
     jmp     .out
 
@@ -528,20 +557,28 @@ parse_declaration:
     pop     rbx
     ret
 
-; rdi = name slot, rsi = its position, with the name already consumed.
-; -> rax = NT_DECL.
+; rdi = name slot, rsi = its position, rdx = the declared type, with the name
+; already consumed. -> rax = NT_DECL.
 ;
 ; The name is declared before the initialiser is parsed, which is C99's rule
 ; and not an accident of order: in "int x = x;" the x on the right is the new
 ; one, and the standard says so.
 ;
-; rbx = the storage slot, r12 = the position, r13 = which storage it is
+; The initialiser becomes the variable's type here, which is where narrowing
+; happens: "char c = 300" stores 44 because the conversion is in the tree, not
+; because anything at run time noticed how wide a char is.
+;
+; rbx = the storage slot, r12 = the position, r13 = which storage it is,
+; r14 = the declared type
 parse_declarator:
     push    rbx
     push    r12
     push    r13
-    sub     rsp, 8
+    push    r14
     mov     r12, rsi
+    mov     r14, rdx
+    cmp     r14, TY_VOID
+    je      .void_variable
     call    scope_declare
     cmp     rax, -1
     je      .fail
@@ -555,24 +592,35 @@ parse_declarator:
     call    parse_expression
     cmp     qword [err_code], 0
     jne     .fail
+    mov     rdi, rax
+    mov     rsi, r14
+    call    coerce
+    cmp     qword [err_code], 0
+    jne     .fail
     mov     rsi, rax
 .build:
     mov     rdi, rbx
     mov     rdx, r13
     mov     rcx, r12
     call    ast_decl
+    mov     rdi, rax
+    mov     rsi, r14
+    call    ast_typed
     jmp     .out
+.void_variable:
+    mov     rdi, r12
+    call    err_voidvalue
 .fail:
     xor     eax, eax
 .out:
-    add     rsp, 8
+    pop     r14
     pop     r13
     pop     r12
     pop     rbx
     ret
 
-; rdi = name slot, rsi = its position, and the current token is "(".
-; -> rax = NT_EMPTY: a definition does nothing when the line runs.
+; rdi = name slot, rsi = its position, rdx = the return type, and the current
+; token is "(". -> rax = NT_EMPTY: a definition does nothing when the line runs.
 ;
 ; The order here is the whole trick. Parameters are declared into the
 ; function's own scope first, so they land at frame offsets 0, 1, 2 ... which
@@ -581,14 +629,18 @@ parse_declarator:
 ; so a call inside the body finds it and recursion works. Only then is the body
 ; read.
 ;
-; rbx = the position, r12 = the name, r13 = the arity, r14 = the function id
+; rbx = the position, r12 = the name, r13 = the arity, r14 = the function id,
+; r15 = the return type
 parse_function:
     push    rbx
     push    r12
     push    r13
     push    r14
+    push    r15
+    sub     rsp, 8
     mov     rbx, rsi
     mov     r12, rdi
+    mov     r15, rdx
     xor     r13, r13
     mov     rdi, rbx
     call    scope_enter_function
@@ -598,25 +650,45 @@ parse_function:
 
     cmp     qword [tok_kind], TK_RPAREN
     je      .params_done
-    cmp     qword [tok_kind], TK_VOID
-    jne     .parameter
-    call    lex_next                    ; "(void)" is the empty list
-    jmp     .params_done
-
-.parameter:
-    cmp     qword [tok_kind], TK_INT
-    jne     .want_type
+    cmp     qword [tok_kind], TK_VOID   ; "(void)" is the empty list, and the
+    jne     .parameter                  ; one place a lone void is a parameter
     call    lex_next
+    cmp     qword [tok_kind], TK_RPAREN
+    je      .params_done
+    mov     rdi, [tok_pos]
+    call    err_expectedname
+    jmp     .fail
+
+; A parameter is declared into the function's scope with its type, and the
+; type is also recorded against the function, because a call site three lines
+; later has to convert its arguments to something and this is the only record
+; of what.
+.parameter:
+    mov     rax, [tok_kind]
+    cmp     rax, TK_SPEC_FIRST
+    jb      .want_type
+    cmp     rax, TK_SPEC_LAST
+    ja      .want_type
+    call    parse_type
+    cmp     rax, -1
+    je      .fail
+    cmp     rax, TY_VOID
+    je      .want_type
+    mov     [param_type], rax
     cmp     qword [tok_kind], TK_IDENT
     jne     .want_name
     mov     rdi, [tok_val]
     mov     rsi, [tok_pos]
+    mov     rdx, [param_type]
     call    scope_declare
     cmp     rax, -1
     je      .fail
-    inc     r13
     cmp     r13, PARAM_MAX
-    ja      .too_many
+    jae     .too_many
+    lea     rcx, [param_types]
+    mov     rdx, [param_type]
+    mov     [rcx + r13 * CELL], rdx
+    inc     r13
     call    lex_next
     cmp     qword [tok_kind], TK_COMMA
     jne     .params_done
@@ -630,15 +702,20 @@ parse_function:
     mov     rdi, r12
     mov     rsi, r13
     mov     rdx, rbx
+    mov     rcx, r15
     call    func_declare
     cmp     rax, -1
     je      .fail
     mov     r14, rax
+    call    record_params
 
     cmp     qword [tok_kind], TK_LBRACE
     jne     .want_brace
     inc     qword [func_depth]
+    push    qword [parse_ret_type]
+    mov     [parse_ret_type], r15
     call    parse_block
+    pop     qword [parse_ret_type]
     dec     qword [func_depth]
     cmp     qword [err_code], 0
     jne     .fail
@@ -685,9 +762,33 @@ parse_function:
 .fail_noleave:
     xor     eax, eax
 .out:
+    add     rsp, 8
+    pop     r15
     pop     r14
     pop     r13
     pop     r12
+    pop     rbx
+    ret
+
+; The parameters are the first r13 bindings of the function's scope, in order,
+; because they were declared first and into an empty one. So their types are
+; read back from where they already are rather than collected a second time.
+;
+; rcx = which parameter
+record_params:
+    push    rbx
+    xor     ebx, ebx
+.next:
+    cmp     rbx, r13
+    jae     .done
+    mov     rdi, r14
+    mov     rsi, rbx
+    lea     rcx, [param_types]
+    mov     rdx, [rcx + rbx * CELL]
+    call    func_set_param
+    inc     rbx
+    jmp     .next
+.done:
     pop     rbx
     ret
 
@@ -1034,11 +1135,23 @@ parse_expression:
     call    parse_expression            ; right-associative for free
     cmp     qword [err_code], 0
     jne     .fail
+
+; An assignment's value is the value stored, not the value written -- so with
+; "char c" the expression "c = 300" is 44, and the conversion that makes that
+; true is one node in front of the store rather than a rule at run time.
+    mov     rdi, rax
+    mov     rsi, [rbx + NODE_TYPE]
+    call    coerce
+    cmp     qword [err_code], 0
+    jne     .fail
     mov     rsi, rax
     mov     rdi, r12
     mov     rdx, [rbx + NODE_RHS]       ; global cell or frame offset
     mov     rcx, [rbx + NODE_POS]
     call    ast_assign
+    mov     rdi, rax
+    mov     rsi, [rbx + NODE_TYPE]
+    call    ast_typed
     jmp     .out
 
 .not_lvalue:
@@ -1082,16 +1195,16 @@ parse_binary:
     cmp     qword [err_code], 0
     jne     .fail
 
-    mov     rdx, rax
-    mov     rdi, r13
-    mov     rsi, rbx
+    mov     rsi, rax
+    mov     rdi, rbx
+    mov     rdx, r13
     mov     rcx, r14
     cmp     r13, TK_ANDAND              ; these two must not evaluate both
     jae     .short_circuit
-    call    ast_binary
+    call    build_binary
     jmp     .built
 .short_circuit:
-    call    ast_logical
+    call    build_logical
 .built:
     test    rax, rax
     jz      .fail
@@ -1112,6 +1225,9 @@ parse_binary:
 
 ; Unary plus produces no node at all; the other three do, and all of them
 ; nest, so "!!x" and "- -x" both parse.
+;
+; "-" and "~" promote their operand and answer that type; "!" answers int
+; whatever it was given, because a truth value is an int and nothing else.
 parse_unary:
     mov     rax, [tok_kind]
     cmp     rax, TK_MINUS
@@ -1136,7 +1252,7 @@ parse_unary:
     mov     rsi, rax
     pop     rdx
     pop     rdi
-    jmp     ast_unary
+    jmp     build_unary
 .fail:
     pop     rdx
     pop     rdi
@@ -1147,6 +1263,8 @@ parse_primary:
     mov     rax, [tok_kind]
     cmp     rax, TK_NUM
     je      .number
+    cmp     rax, TK_SIZEOF
+    je      .sizeof
     cmp     rax, TK_IDENT
     je      .ident
     cmp     rax, TK_STR
@@ -1162,6 +1280,9 @@ parse_primary:
     mov     rdi, [tok_val]
     mov     rsi, [tok_pos]
     call    ast_num
+    mov     rdi, rax
+    mov     rsi, [tok_type]             ; the suffix, or the width it needed
+    call    ast_typed
     test    rax, rax
     jz      .zero
     push    rax
@@ -1173,6 +1294,9 @@ parse_primary:
     mov     rdi, [tok_val]
     mov     rsi, [tok_pos]
     call    ast_str
+    mov     rdi, rax
+    mov     esi, TY_LONG                ; an address, until pointers exist
+    call    ast_typed
     test    rax, rax
     jz      .zero
     push    rax
@@ -1196,13 +1320,17 @@ parse_primary:
     cmp     rdi, BI_COUNT               ; printf is a name, not a variable
     jb      .builtin
     push    rsi
-    call    scope_lookup                ; rax = the slot, rdx = which storage
+    call    scope_lookup                ; slot, storage kind, declared type
     pop     rsi
     cmp     rax, -1
     je      .undeclared
+    push    rcx
     mov     rdi, rax
     xchg    rsi, rdx                    ; rsi = the kind, rdx = the position
-    jmp     ast_var
+    call    ast_var
+    pop     rsi
+    mov     rdi, rax
+    jmp     ast_typed
 .call:
     pop     rsi
     pop     rdi
@@ -1218,8 +1346,47 @@ parse_primary:
     xor     eax, eax
     ret
 
+; A "(" is either a grouping or a cast, and the token after it says which --
+; the second and last place the parser needs to see past one token, and like
+; the first it sees it by consuming a token it would have wanted anyway.
 .paren:
     call    lex_next
+    mov     rax, [tok_kind]
+    cmp     rax, TK_SPEC_FIRST
+    jb      .grouping
+    cmp     rax, TK_SPEC_LAST
+    ja      .grouping
+
+.cast:
+    push    qword [tok_pos]
+    call    parse_type
+    cmp     rax, -1
+    je      .cast_failed
+    push    rax
+    cmp     qword [tok_kind], TK_RPAREN
+    jne     .cast_unclosed
+    call    lex_next
+    call    parse_unary                 ; binds tighter than any binary operator
+    cmp     qword [err_code], 0
+    jne     .cast_dropped
+    pop     rsi
+    pop     rdx
+    mov     rdi, rax
+    jmp     coerce
+.cast_unclosed:
+    pop     rax
+.cast_failed:
+    pop     rdi
+    call    err_unclosed
+    xor     eax, eax
+    ret
+.cast_dropped:
+    pop     rsi
+    pop     rdx
+    xor     eax, eax
+    ret
+
+.grouping:
     call    parse_expression
     cmp     qword [err_code], 0
     jne     .zero
@@ -1229,6 +1396,61 @@ parse_primary:
     call    lex_next
     pop     rax
     ret
+
+; "sizeof (type)", "sizeof (expression)" and "sizeof expression", all folded
+; here into a constant. The operand of the last two is parsed and then dropped:
+; only its type was ever wanted, and C99 says it is not evaluated.
+.sizeof:
+    push    qword [tok_pos]
+    call    lex_next
+    cmp     qword [tok_kind], TK_LPAREN
+    jne     .sizeof_bare
+    call    lex_next
+    mov     rax, [tok_kind]
+    cmp     rax, TK_SPEC_FIRST
+    jb      .sizeof_paren
+    cmp     rax, TK_SPEC_LAST
+    ja      .sizeof_paren
+    call    parse_type
+    cmp     rax, -1
+    je      .sizeof_failed
+    push    rax
+    cmp     qword [tok_kind], TK_RPAREN
+    jne     .sizeof_unclosed
+    call    lex_next
+    pop     rdi
+    jmp     .sizeof_done
+.sizeof_paren:
+    call    parse_expression
+    cmp     qword [err_code], 0
+    jne     .sizeof_failed
+    push    qword [rax + NODE_TYPE]
+    cmp     qword [tok_kind], TK_RPAREN
+    jne     .sizeof_unclosed
+    call    lex_next
+    pop     rdi
+    jmp     .sizeof_done
+.sizeof_bare:
+    call    parse_unary
+    cmp     qword [err_code], 0
+    jne     .sizeof_failed
+    mov     rdi, [rax + NODE_TYPE]
+.sizeof_done:
+    call    type_size
+    pop     rsi
+    mov     rdi, rax
+    call    ast_num
+    mov     rdi, rax
+    mov     esi, TY_ULONG               ; which is what size_t is here
+    jmp     ast_typed
+.sizeof_unclosed:
+    pop     rax
+.sizeof_failed:
+    pop     rdi
+    call    err_unclosed
+    xor     eax, eax
+    ret
+
 .unclosed:
     mov     rdi, [tok_pos]
     call    err_unclosed
@@ -1272,6 +1494,16 @@ parse_call:
 
 .argument:
     call    parse_expression
+    cmp     qword [err_code], 0
+    jne     .fail
+    mov     [arg_node], rax
+    mov     rdi, rax
+    mov     rsi, r12
+    mov     rdx, r15
+    call    arg_type
+    mov     rsi, rax
+    mov     rdi, [arg_node]
+    call    coerce
     cmp     qword [err_code], 0
     jne     .fail
     mov     rdi, rax
@@ -1321,6 +1553,12 @@ parse_call:
     mov     rdx, r15
     mov     rcx, rbx
     call    ast_call
+    push    rax
+    mov     rdi, r12
+    call    builtin_type
+    mov     rsi, rax
+    pop     rdi
+    call    ast_typed
     jmp     .out
 
 ; A user function knows how many arguments it takes, so a call that disagrees
@@ -1336,6 +1574,12 @@ parse_call:
     mov     rdx, r15
     mov     rcx, rbx
     call    ast_invoke
+    push    rax
+    mov     rdi, r12
+    call    func_type
+    mov     rsi, rax
+    pop     rdi
+    call    ast_typed
     jmp     .out
 
 .unclosed:
@@ -1368,10 +1612,377 @@ parse_call:
     pop     rbx
     ret
 
+
+; ---------------------------------------------------------------------------
+; Types, and the four places the parser has to think about them.
+;
+; All of it happens here and none of it happens later. By the time a tree
+; leaves this file every conversion C99 asks for is a node in it and every
+; operator has been told whether it is the signed one, so both engines can run
+; the tree without knowing what a type is. That is the same trick scope.asm
+; plays with names, for the same reason.
+
+; -> rax = the type the specifier keywords spell, or -1 with the error already
+; recorded. The current token is the first of them and they are all consumed.
+;
+; The words may come in any order, so they are gathered into a set and judged
+; once at the end -- which is specifier.asm's whole job and not this file's.
+;
+; rbx = the set so far, r12 = how many "long"s, r13 = where it started
+parse_type:
+    push    rbx
+    push    r12
+    push    r13
+    sub     rsp, 8
+    mov     r13, [tok_pos]
+    xor     ebx, ebx
+    xor     r12d, r12d
+.more:
+    mov     rax, [tok_kind]
+    cmp     rax, TK_SPEC_FIRST
+    jb      .end
+    cmp     rax, TK_SPEC_LAST
+    ja      .end
+    sub     rax, TK_SPEC_FIRST
+    lea     rcx, [spec_bits]
+    movzx   edx, byte [rcx + rax]
+    cmp     edx, SP_LONG                ; "long long" is two of them, not one
+    jne     .set
+    inc     r12
+.set:
+    or      rbx, rdx
+    call    lex_next
+    jmp     .more
+
+.end:
+    test    rbx, rbx
+    jz      .none
+    mov     rdi, rbx
+    mov     rsi, r12
+    call    type_build
+    cmp     rax, -1
+    je      .bad
+    jmp     .out
+.none:
+    mov     rdi, r13
+    call    err_expectedtype
+    mov     rax, -1
+    jmp     .out
+.bad:
+    mov     rdi, r13
+    call    err_badtype
+    mov     rax, -1
+.out:
+    add     rsp, 8
+    pop     r13
+    pop     r12
+    pop     rbx
+    ret
+
+; rdi = an expression node, rsi = the type it has to have -> rax = the node,
+; wrapped in a conversion if it is not already of that type.
+;
+; The one door every conversion goes through -- an initialiser, an assignment,
+; an argument, a return value, a cast, and both operands of every arithmetic
+; operator. It is also therefore the one place that can notice a void being
+; used as a value, so that is where the complaint lives.
+coerce:
+    test    rdi, rdi
+    jz      .none
+    mov     rax, [rdi + NODE_TYPE]
+    cmp     rax, rsi
+    je      .already
+    cmp     rax, TY_VOID
+    je      .void
+    mov     rdx, [rdi + NODE_POS]
+    jmp     ast_conv
+.already:
+    mov     rax, rdi
+    ret
+.void:
+    mov     rdi, [rdi + NODE_POS]
+    call    err_voidvalue
+.none:
+    xor     eax, eax
+    ret
+
+; rdi = a node that has just produced an arithmetic result, rsi = its type
+; -> rax = the node, narrowed if that type is narrower than a cell.
+;
+; int arithmetic wraps at 32 bits, because that is what an int does. The cell
+; is 64 bits wide either way; this is what keeps the value in it honest about
+; which type it is.
+;
+; rbx = the node, r12 = the type
+wrap_result:
+    push    rbx
+    push    r12
+    mov     rbx, rdi
+    mov     r12, rsi
+    test    rbx, rbx
+    jz      .as_is
+    mov     rdi, r12
+    call    type_size
+    cmp     rax, CELL
+    jae     .as_is
+    mov     rdi, rbx
+    mov     rsi, r12
+    mov     rdx, [rbx + NODE_POS]
+    call    ast_conv
+    jmp     .out
+.as_is:
+    mov     rax, rbx
+.out:
+    pop     r12
+    pop     rbx
+    ret
+
+; rdi = lhs, rsi = rhs, rdx = operator token, rcx = position -> rax.
+;
+; The usual arithmetic conversions, applied where they belong: both operands
+; become the common type, the operator is built, and the answer is that type --
+; except for a comparison, which answers int whatever it compared.
+;
+; rbx = lhs, r12 = rhs, r13 = the operator, r14 = the position, r15 = the type
+; both operands ended up with
+build_binary:
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
+    sub     rsp, 8
+    mov     rbx, rdi
+    mov     r12, rsi
+    mov     r13, rdx
+    mov     r14, rcx
+    test    rbx, rbx
+    jz      .fail
+    test    r12, r12
+    jz      .fail
+
+    cmp     r13, TK_SHL
+    je      .shift
+    cmp     r13, TK_SHR
+    je      .shift
+
+    mov     rdi, [rbx + NODE_TYPE]
+    mov     rsi, [r12 + NODE_TYPE]
+    call    type_common
+    mov     r15, rax
+    mov     rdi, rbx
+    mov     rsi, r15
+    call    coerce
+    mov     rbx, rax
+    mov     rdi, r12
+    mov     rsi, r15
+    call    coerce
+    mov     r12, rax
+    jmp     .assemble
+
+; A shift is the one binary operator with no common type. C99 promotes each
+; operand on its own and the result is the left one's type -- shifting is not
+; symmetric, and pretending it were would make "1L << n" depend on what n
+; happens to be declared as.
+.shift:
+    mov     rdi, [rbx + NODE_TYPE]
+    call    type_promote
+    mov     r15, rax
+    mov     rdi, rbx
+    mov     rsi, r15
+    call    coerce
+    mov     rbx, rax
+    mov     rdi, [r12 + NODE_TYPE]
+    call    type_promote
+    mov     rsi, rax
+    mov     rdi, r12
+    call    coerce
+    mov     r12, rax
+
+.assemble:
+    cmp     qword [err_code], 0
+    jne     .fail
+    mov     rdi, r13
+    mov     rsi, rbx
+    mov     rdx, r12
+    mov     rcx, r14
+    call    ast_binary
+    test    rax, rax
+    jz      .fail
+
+    cmp     r13, TK_LT                  ; the six comparisons answer int
+    jb      .arithmetic
+    cmp     r13, TK_NE
+    ja      .arithmetic
+    mov     rdi, rax
+    mov     esi, TY_INT
+    call    ast_typed
+    jmp     .out
+
+.arithmetic:
+    mov     rdi, rax
+    mov     rsi, r15
+    call    ast_typed
+    mov     rdi, rax
+    mov     rsi, r15
+    call    wrap_result
+    jmp     .out
+.fail:
+    xor     eax, eax
+.out:
+    add     rsp, 8
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    ret
+
+; rdi = lhs, rsi = rhs, rdx = the "&&" or "||", rcx = position -> rax.
+;
+; No conversions and no common type: both operands are tested against zero and
+; nothing else is done to them, so the only question worth asking is whether
+; either of them is a void, and the answer is always int.
+build_logical:
+    test    rdi, rdi
+    jz      .fail
+    test    rsi, rsi
+    jz      .fail
+    cmp     qword [rdi + NODE_TYPE], TY_VOID
+    je      .void
+    cmp     qword [rsi + NODE_TYPE], TY_VOID
+    je      .void
+    mov     r8, rdi
+    mov     rdi, rdx                    ; ast_logical wants the operator first
+    mov     rdx, rsi
+    mov     rsi, r8
+    call    ast_logical
+    test    rax, rax
+    jz      .fail
+    mov     rdi, rax
+    mov     esi, TY_INT
+    jmp     ast_typed
+.void:
+    mov     rdi, rcx
+    call    err_voidvalue
+.fail:
+    xor     eax, eax
+    ret
+
+; rdi = operator token, rsi = operand, rdx = position -> rax
+;
+; rbx = the operand, r12 = the operator, r13 = the position, r14 = the type
+build_unary:
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    mov     rbx, rsi
+    mov     r12, rdi
+    mov     r13, rdx
+    test    rbx, rbx
+    jz      .fail
+
+    cmp     r12, TK_BANG
+    je      .logical
+    mov     rdi, [rbx + NODE_TYPE]
+    call    type_promote
+    mov     r14, rax
+    mov     rdi, rbx
+    mov     rsi, r14
+    call    coerce
+    cmp     qword [err_code], 0
+    jne     .fail
+    mov     rsi, rax
+    mov     rdi, r12
+    mov     rdx, r13
+    call    ast_unary
+    mov     rdi, rax
+    mov     rsi, r14
+    call    ast_typed
+    mov     rdi, rax
+    mov     rsi, r14
+    call    wrap_result
+    jmp     .out
+
+; "!" is a test, so its operand keeps whatever type it had and its answer is
+; an int -- the one unary operator that converts nothing at all.
+.logical:
+    mov     rdi, [rbx + NODE_TYPE]
+    cmp     rdi, TY_VOID
+    je      .void
+    mov     rsi, rbx
+    mov     rdi, r12
+    mov     rdx, r13
+    call    ast_unary
+    mov     rdi, rax
+    mov     esi, TY_INT
+    call    ast_typed
+    jmp     .out
+.void:
+    mov     rdi, r13
+    call    err_voidvalue
+.fail:
+    xor     eax, eax
+.out:
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    ret
+
+; rdi = the argument node, rsi = the callee, rdx = which argument
+; -> rax = the type that argument has to be converted to.
+;
+; A user function and a fixed-arity builtin both declared what they take. The
+; variadic one cannot, so everything past its format gets the default argument
+; promotions instead -- which is exactly what C does, and the reason printf can
+; be handed a char and still find an int.
+arg_type:
+    cmp     rdx, PARAM_MAX
+    jae     .anything
+    test    rsi, FN_TAG
+    jnz     .user
+    cmp     rsi, BI_PRINTF
+    jne     .fixed
+    test    rdx, rdx
+    jz      .fixed                      ; argument zero is the format
+    mov     rdi, [rdi + NODE_TYPE]
+    jmp     type_promote
+.fixed:
+    mov     rdi, rsi
+    jmp     builtin_param
+.user:
+    mov     rdi, rsi
+    and     rdi, ~FN_TAG
+    mov     rsi, rdx
+    jmp     func_param
+.anything:
+    mov     eax, TY_INT
+    ret
+
+; ---------------------------------------------------------------------------
+    section .data
+
+; Token kind minus TK_SPEC_FIRST -> the bit it contributes. The order is the
+; one tsafoshi.inc numbers them in, and this table is what keeps the two lists
+; from drifting apart.
+spec_bits:
+    db      SP_VOID                     ; TK_VOID
+    db      SP_BOOL                     ; TK_BOOL
+    db      SP_CHAR                     ; TK_CHAR
+    db      SP_SHORT                    ; TK_SHORT
+    db      SP_INT                      ; TK_INT
+    db      SP_LONG                     ; TK_LONG
+    db      SP_SIGNED                   ; TK_SIGNED
+    db      SP_UNSIGNED                 ; TK_UNSIGNED
+
 ; ---------------------------------------------------------------------------
     section .bss
 
     alignb  8
+arg_node:
+    resq    1
 parse_silent:
     resq    1
 parse_value:
@@ -1384,3 +1995,11 @@ loop_depth:
     resq    1
 func_depth:
     resq    1
+parse_ret_type:
+    resq    1
+decl_type:
+    resq    1
+param_type:
+    resq    1
+param_types:
+    resq    PARAM_MAX

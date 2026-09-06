@@ -42,6 +42,8 @@
     extern  str_addr
     extern  builtin_run
     extern  err_code
+    extern  type_unsigned
+    extern  type_convert
 
     section .text
 
@@ -115,6 +117,12 @@ ast_eval:
     cmp     qword [err_code], 0
     jne     .fail
     mov     rsi, rax
+    push    rsi
+    mov     rdi, [rbx + NODE_LHS]       ; the operands share a type, so the
+    mov     rdi, [rdi + NODE_TYPE]      ; left one decides for both
+    call    type_unsigned
+    mov     r8, rax
+    pop     rsi
     mov     rdi, r12
     mov     rdx, [rbx + NODE_VAL]
     mov     rcx, [rbx + NODE_POS]
@@ -480,6 +488,23 @@ ast_eval:
     pop     rbx
     ret
 
+; The walker's half of a conversion: evaluate the value, then narrow it. The
+; VM does the same thing with one opcode, and both call the same routine, so
+; there is exactly one definition of what "becoming a char" does.
+.conv:
+    push    rbx
+    mov     rbx, rdi
+    mov     rdi, [rbx + NODE_LHS]
+    call    ast_eval
+    cmp     qword [err_code], 0
+    jne     .conv_failed
+    mov     rdi, rax
+    mov     rsi, [rbx + NODE_VAL]
+    call    type_convert
+    pop     rbx
+    ret
+.conv_failed:
+    pop     rbx
 .zero:
     xor     eax, eax
     ret
@@ -510,6 +535,7 @@ node_table:
     dq      ast_eval.zero               ; NT_EMPTY
     dq      ast_eval.return             ; NT_RETURN
     dq      ast_eval.icall              ; NT_INVOKE
+    dq      ast_eval.conv               ; NT_CONV
 
 ; ---------------------------------------------------------------------------
     section .bss

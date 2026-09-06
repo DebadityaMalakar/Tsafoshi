@@ -24,6 +24,8 @@
 
     global  builtin_arity
     global  builtin_run
+    global  builtin_type
+    global  builtin_param
 
     extern  printf_run
     extern  cli_argc                    ; a count, not a routine
@@ -32,16 +34,38 @@
 
 BF_ARITY            equ 0
 BF_ROUTINE          equ CELL
-BF_SIZE             equ CELL * 2
+BF_TYPE             equ CELL * 2        ; what it gives back
+BF_PARAM            equ CELL * 3        ; what its argument is, where it has one
+BF_SIZE             equ CELL * 4
 
     section .text
 
-; rdi = builtin id -> rax = how many arguments it takes, or BI_VARIADIC
-builtin_arity:
+; rdi = builtin id -> rax = the field asked for
+entry:
     sub     rdi, BI_FIRST
     lea     rax, [builtins]
     imul    rcx, rdi, BF_SIZE
-    mov     rax, [rax + rcx + BF_ARITY]
+    add     rax, rcx
+    ret
+
+; -> rax = how many arguments it takes, or BI_VARIADIC
+builtin_arity:
+    call    entry
+    mov     rax, [rax + BF_ARITY]
+    ret
+
+; -> rax = the type of the value it produces
+builtin_type:
+    call    entry
+    mov     rax, [rax + BF_TYPE]
+    ret
+
+; -> rax = the type its argument is converted to. printf's is the type of its
+; format; everything after that gets the default argument promotions instead,
+; because a variadic call has nothing else to go on.
+builtin_param:
+    call    entry
+    mov     rax, [rax + BF_PARAM]
     ret
 
 ; rdi = builtin id, rsi = the arguments, rdx = how many, rcx = position -> rax
@@ -93,7 +117,7 @@ bi_exit:
 ; them and tsafoshi.inc numbers them.
     align   8
 builtins:
-    dq      BI_VARIADIC, printf_run     ; BI_PRINTF
-    dq      0, bi_argc                  ; BI_ARGC
-    dq      1, bi_argv                  ; BI_ARGV
-    dq      1, bi_exit                  ; BI_EXIT
+    dq      BI_VARIADIC, printf_run, TY_INT, TY_LONG ; BI_PRINTF
+    dq      0, bi_argc, TY_INT, TY_VOID ; BI_ARGC
+    dq      1, bi_argv, TY_LONG, TY_INT ; BI_ARGV
+    dq      1, bi_exit, TY_VOID, TY_INT ; BI_EXIT

@@ -1,0 +1,79 @@
+1 + 2 * 3
+(1 + 2) * 3
+7 / 2
+-7 / 2
+7 % 3
+-7 % 3
+1 << 10
+-16 >> 2
+5 & 3
+5 | 3
+5 ^ 3
+~0
+!0
+!5
+1 && 0
+1 || 0
+0 && 1
+0 || 0
+2147483647 + 1
+2147483648
+sizeof(char)
+sizeof(short)
+sizeof(int)
+sizeof(long)
+sizeof(_Bool)
+sizeof(unsigned int)
+sizeof 1
+sizeof 1L
+char c = 300; c
+unsigned char uc = 300; uc
+short s = 70000; s
+unsigned short us = 70000; us
+int i = 2147483648; i
+unsigned int u = -1; u
+long l = -1; l
+unsigned long ul = -1; ul
+_Bool b = 256; b
+_Bool b2 = 0; b2
+(char)300
+(unsigned char)-1
+(short)70000
+(unsigned)-1
+(int)4294967296
+(long)-1
+(_Bool)7
+u > 0
+i > 0
+u / 2
+(unsigned)-2 / 2
+(unsigned)-2 >> 1
+-2 >> 1
+u == 4294967295
+c + 1
+c * c
+'A'
+'a' - 'A'
+'\n'
+'\0'
+0x1f
+0xff
+017
+0
+10u
+10L
+10UL
+2147483647
+-2147483648
+int add(int a, int b) { return a + b; } add(3, 4)
+char lo(int x) { return x; } lo(300)
+unsigned wrap(unsigned x) { return x * 2; } wrap(2147483648)
+long big(long x) { return x * x; } big(4000000000)
+_Bool truth(int x) { return x; } truth(256)
+void nothing(void) { return; } 1
+int f(void) { int t = 0; int k; for (k = 0; k < 5; k = k + 1) t = t + k; return t; } f()
+printf("%d %d %d\n", (char)200, (unsigned char)200, (short)-1)
+printf("%c%c%c\n", 72, 105, 33)
+printf("[%lu] [%ld]\n", (unsigned long)-1, -1L)
+printf("%d\n", sizeof(long))
+:vars

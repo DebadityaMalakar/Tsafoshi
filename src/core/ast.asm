@@ -14,9 +14,12 @@
 ; knows how the others work, which is the whole point of having the tree in
 ; between.
 ;
-; Every node is the same five cells whatever its kind: the three pointer slots
+; Every node is the same six cells whatever its kind: the three pointer slots
 ; are reused rather than added to, so a while loop and a binary operator cost
-; the same. tsafoshi.inc records which slot means what for each kind.
+; the same. tsafoshi.inc records which slot means what for each kind. The sixth
+; is the type, which only expressions have and which stage 3.2 added -- the
+; alternative was packing it into the kind, and a node is cheap enough that
+; hiding a field inside another one would be a worse trade than one more cell.
 ;
 ; Because every node is the same shape, every constructor is the same routine
 ; with different arguments -- so they are all one routine, and each public name
@@ -44,6 +47,8 @@
     global  ast_leaf
     global  ast_return
     global  ast_invoke
+    global  ast_conv
+    global  ast_typed
 
     extern  err_toobig
 
@@ -79,12 +84,43 @@ ast_make:
     mov     [rax + NODE_LHS], rdx
     mov     [rax + NODE_RHS], rcx
     mov     [rax + NODE_POS], r8
+    mov     qword [rax + NODE_TYPE], TY_VOID
     ret
 .full:
     mov     rdi, r8
     call    err_toobig
     xor     eax, eax
     ret
+
+; rdi = node or zero, rsi = its type -> rax = the node.
+;
+; The type is written afterwards rather than passed in, because ast_make's
+; five arguments are already the four slots and a position, and a sixth would
+; cost every constructor a register shuffle for a field only expressions use.
+; Passing a node straight through means a call site reads as one sentence.
+ast_typed:
+    mov     rax, rdi
+    test    rdi, rdi
+    jz      .none
+    mov     [rdi + NODE_TYPE], rsi
+.none:
+    ret
+
+; rdi = the value, rsi = the type to convert it to, rdx = position -> rax.
+;
+; Every conversion C99 asks for is one of these, made by the parser and sitting
+; in the tree where it happened. Neither engine works out that a conversion is
+; needed; both are simply told.
+ast_conv:
+    push    rsi
+    mov     r8, rdx
+    mov     rdx, rdi
+    xor     ecx, ecx
+    mov     edi, NT_CONV
+    call    ast_make
+    pop     rsi
+    mov     rdi, rax
+    jmp     ast_typed
 
 ; rdi = value, rsi = position -> rax
 ast_num:

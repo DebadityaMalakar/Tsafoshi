@@ -28,6 +28,9 @@
     global  func_set_entry
     global  func_set_body
     global  func_count
+    global  func_type
+    global  func_param
+    global  func_set_param
 
     extern  err_toomanyfuncs
     extern  err_redefined
@@ -37,7 +40,8 @@ FN_ARITY            equ CELL
 FN_FRAME            equ CELL * 2        ; cells of locals, parameters included
 FN_ENTRY            equ CELL * 3        ; offset into the code arena
 FN_BODY             equ CELL * 4        ; the statement list, for the walker
-FN_SIZE             equ CELL * 5
+FN_TYPE             equ CELL * 5        ; what it returns
+FN_SIZE             equ CELL * 6
 
     section .text
 
@@ -52,7 +56,8 @@ record:
     add     rax, rcx
     ret
 
-; rdi = name slot, rsi = arity, rdx = position -> rax = the function id, or -1.
+; rdi = name slot, rsi = arity, rdx = position, rcx = return type
+; -> rax = the function id, or -1.
 ;
 ; Redefinition is refused rather than allowed to shadow. At a prompt it is
 ; tempting to let the second definition win, but then a call compiled against
@@ -62,10 +67,11 @@ func_declare:
     push    rbx
     push    r12
     push    r13
-    sub     rsp, 8
+    push    r14
     mov     rbx, rdi
     mov     r12, rsi
     mov     r13, rdx
+    mov     r14, rcx
     mov     rdi, rbx
     call    func_find
     cmp     rax, -1
@@ -80,6 +86,7 @@ func_declare:
     mov     qword [rax + FN_FRAME], 0
     mov     qword [rax + FN_ENTRY], 0
     mov     qword [rax + FN_BODY], 0
+    mov     [rax + FN_TYPE], r14
     mov     rax, [func_count]
     inc     qword [func_count]
     jmp     .out
@@ -94,7 +101,7 @@ func_declare:
 .fail:
     mov     rax, -1
 .out:
-    add     rsp, 8
+    pop     r14
     pop     r13
     pop     r12
     pop     rbx
@@ -141,6 +148,31 @@ func_body:
     call    record
     mov     rax, [rax + FN_BODY]
     ret
+func_type:
+    call    record
+    mov     rax, [rax + FN_TYPE]
+    ret
+
+; The parameter types, kept beside the table rather than in it: they are a
+; short list per function, they are read only where a call is being built, and
+; a record with a variable-length tail would be the one shape in this tree that
+; is not a fixed number of cells.
+;
+; rdi = function id, rsi = which parameter -> rax = its type
+func_param:
+    lea     rax, [fn_ptypes]
+    imul    rcx, rdi, PARAM_MAX
+    add     rcx, rsi
+    movzx   eax, byte [rax + rcx]
+    ret
+
+; rdi = function id, rsi = which parameter, rdx = its type
+func_set_param:
+    lea     rax, [fn_ptypes]
+    imul    rcx, rdi, PARAM_MAX
+    add     rcx, rsi
+    mov     [rax + rcx], dl
+    ret
 
 ; rdi = function id, rsi = the value to record
 func_set_frame:
@@ -164,3 +196,5 @@ func_count:
     resq    1
 func_tab:
     resb    FUNC_CAP * FN_SIZE
+fn_ptypes:
+    resb    FUNC_CAP * PARAM_MAX

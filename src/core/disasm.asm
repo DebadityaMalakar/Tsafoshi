@@ -17,6 +17,7 @@
     extern  func_name
     extern  name_text
     extern  scope_name_of
+    extern  type_name
     extern  sys_write_stdout
 
 MNEMONIC_LEN        equ 7               ; padded, so operands line up
@@ -162,6 +163,16 @@ disasm_range:
     call    sys_write_stdout
     jmp     .endline
 
+; A type is printed by name for the same reason a global is: the name exists,
+; it is short, and a listing that says "conv 8" is a listing nobody can read.
+.typename:
+    call    take_u32
+    mov     rdi, rax
+    call    type_name
+    mov     rsi, rax
+    call    sys_write_stdout
+    jmp     .endline
+
 ; The builtin is named rather than numbered, because the name is still there:
 ; it was interned before any input was read and nothing ever releases it.
 .builtin:
@@ -253,6 +264,13 @@ mnemonics:
     db      "and    "                   ; OP_AND
     db      "xor    "                   ; OP_XOR
     db      "or     "                   ; OP_OR
+    db      "udiv   "                   ; OP_UDIV
+    db      "umod   "                   ; OP_UMOD
+    db      "ushr   "                   ; OP_USHR
+    db      "ult    "                   ; OP_ULT
+    db      "ugt    "                   ; OP_UGT
+    db      "ule    "                   ; OP_ULE
+    db      "uge    "                   ; OP_UGE
     db      "neg    "                   ; OP_NEG
     db      "not    "                   ; OP_NOT
     db      "bnot   "                   ; OP_BNOT
@@ -268,6 +286,7 @@ mnemonics:
     db      "storel "                   ; OP_STOREL
     db      "call   "                   ; OP_CALL
     db      "ret    "                   ; OP_RET
+    db      "conv   "                   ; OP_CONV
 
 ; opcode -> what follows it, as an index into operand_table
 operands:
@@ -280,6 +299,8 @@ operands:
     db      0, 0, 0, 0                  ; OP_LT OP_GT OP_LE OP_GE
     db      0, 0                        ; OP_EQ OP_NE
     db      0, 0, 0                     ; OP_AND OP_XOR OP_OR
+    db      2, 2                        ; OP_UDIV OP_UMOD      a column
+    db      0, 0, 0, 0, 0               ; OP_USHR .. OP_UGE
     db      0, 0, 0                     ; OP_NEG OP_NOT OP_BNOT
     db      0                           ; OP_POP
     db      3, 3                        ; OP_LOAD OP_STORE storage slot
@@ -289,6 +310,7 @@ operands:
     db      7, 7                        ; OP_LOADL OP_STOREL   frame offset
     db      8                           ; OP_CALL     a function
     db      0                           ; OP_RET
+    db      10                          ; OP_CONV     the type it converts to
 
     align   8
 operand_table:
@@ -302,6 +324,7 @@ operand_table:
     dq      disasm_range.frame
     dq      disasm_range.callee
     dq      disasm_range.builtin
+    dq      disasm_range.typename
 
 t_indent:
     db      "    "

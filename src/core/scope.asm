@@ -35,6 +35,7 @@
     global  scope_global_count
     global  scope_global_name
     global  scope_global_slot
+    global  scope_global_type
     global  scope_name_of
     global  scope_enter_function
     global  scope_leave_function
@@ -47,7 +48,8 @@
 BIND_NAME           equ 0               ; the interned identifier
 BIND_SLOT           equ 4               ; the storage it stands for
 BIND_KIND           equ 8               ; VAR_GLOBAL or VAR_LOCAL
-BIND_SIZE           equ 12
+BIND_TYPE           equ 12              ; and what it was declared as
+BIND_SIZE           equ 16
 
 MARK_COUNT          equ 0               ; bindings live when the block opened
 MARK_NEXT           equ 4               ; global storage in use when it opened
@@ -138,16 +140,23 @@ scope_unwind:
 .done:
     ret
 
-; rdi = name slot, rsi = position -> rax = storage slot, rdx = VAR_GLOBAL or
-; VAR_LOCAL; rax is -1 on failure.
+; rdi = name slot, rsi = position, rdx = the declared type -> rax = storage
+; slot, rdx = VAR_GLOBAL or VAR_LOCAL; rax is -1 on failure.
 ;
 ; Redeclaration is an error in the same scope and shadowing in an inner one,
 ; which is the same rule read from two sides: the search stops at the mark.
+;
+; The type is kept here rather than anywhere else because this is where a name
+; is turned into storage, and the type is the other half of that answer: the
+; parser needs it at every use of the name, and ":vars" needs it afterwards.
 scope_declare:
     push    rbx
     push    r12
+    push    r13
+    sub     rsp, 8
     mov     rbx, rdi
     mov     r12, rsi
+    mov     r13, rdx
     mov     rcx, [bind_count]
     mov     rdx, 0                      ; where the current scope starts
     cmp     qword [depth], 0
@@ -183,6 +192,7 @@ scope_declare:
     mov     [r8 + r9 + BIND_NAME], ebx
     mov     [r8 + r9 + BIND_SLOT], eax
     mov     dword [r8 + r9 + BIND_KIND], VAR_GLOBAL
+    mov     [r8 + r9 + BIND_TYPE], r13d
     inc     qword [bind_count]
     inc     qword [next_slot]
     xor     edx, edx
@@ -200,6 +210,7 @@ scope_declare:
     mov     [r8 + r9 + BIND_NAME], ebx
     mov     [r8 + r9 + BIND_SLOT], eax
     mov     dword [r8 + r9 + BIND_KIND], VAR_LOCAL
+    mov     [r8 + r9 + BIND_TYPE], r13d
     inc     qword [bind_count]
     inc     rax
     mov     [local_next], rax
@@ -221,12 +232,14 @@ scope_declare:
 .fail:
     mov     rax, -1
 .out:
+    add     rsp, 8
+    pop     r13
     pop     r12
     pop     rbx
     ret
 
-; rdi = name slot -> rax = storage slot and rdx = its kind, or rax = -1 if
-; nothing declared it. Backwards, so the innermost binding wins.
+; rdi = name slot -> rax = storage slot, rdx = its kind and rcx = its type, or
+; rax = -1 if nothing declared it. Backwards, so the innermost binding wins.
 scope_lookup:
     mov     rcx, [bind_count]
     lea     r8, [binds]
@@ -241,6 +254,7 @@ scope_lookup:
     jmp     .search
 .found:
     mov     edx, [r8 + r9 + BIND_KIND]
+    mov     ecx, [r8 + r9 + BIND_TYPE]
     mov     eax, [r8 + r9 + BIND_SLOT]
     ret
 .missing:
@@ -293,6 +307,13 @@ scope_global_slot:
     lea     r8, [binds]
     imul    r9, rdi, BIND_SIZE
     mov     eax, [r8 + r9 + BIND_SLOT]
+    ret
+
+; rdi = index -> rax = the type it was declared with
+scope_global_type:
+    lea     r8, [binds]
+    imul    r9, rdi, BIND_SIZE
+    mov     eax, [r8 + r9 + BIND_TYPE]
     ret
 
 ; ---------------------------------------------------------------------------

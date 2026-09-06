@@ -15,6 +15,7 @@
     global  str_intern
     global  str_addr
     global  str_base
+    global  str_escape
 
     extern  err_strspace
     extern  err_badescape
@@ -136,6 +137,27 @@ emit:
     mov     rdi, r15
     call    err_strspace
     mov     qword [str_failed], 1
+    ret
+
+; rdi = just past the backslash, rsi = one past the last byte that could
+; belong to the escape, rdx = position -> al = the byte, rdx = where scanning
+; continues.
+;
+; The same routine a string literal uses, because a character constant escapes
+; exactly the same way a string does -- there is no second table and no second
+; set of rules, which is the only way the two can be guaranteed to agree.
+str_escape:
+    push    rbx
+    push    r12
+    push    r15
+    mov     rbx, rdi
+    mov     r12, rsi
+    mov     r15, rdx
+    call    escape
+    mov     rdx, rbx
+    pop     r15
+    pop     r12
+    pop     rbx
     ret
 
 ; The backslash is already consumed; rbx points at what follows it.

@@ -362,7 +362,7 @@ n_eval:
     db      "-e", 0
 
 m_version:
-    db      "tsafoshi 0.7", 10
+    db      "tsafoshi 0.8", 10
 .len                equ $ - m_version
 
 m_usage:

@@ -45,6 +45,7 @@
     extern  func_body
     extern  err_code
     extern  err_toodeep
+    extern  type_unsigned
 
     section .text
 
@@ -177,6 +178,10 @@ emit_node:
     call    code_op
     jmp     .out
 
+; The token gives the opcode and the operands' type gives which of the two
+; opcodes it is. Seven of the sixteen have an unsigned twin; the operands were
+; already converted to a common type by the parser, so the left one's
+; signedness is the whole answer.
 .binary:
     mov     rdi, [rbx + NODE_LHS]
     call    emit_node
@@ -186,11 +191,30 @@ emit_node:
     sub     rdi, TK_OP_FIRST
     add     rdi, OP_BIN_FIRST
     push    rdi
+    mov     rdi, [rbx + NODE_LHS]
+    mov     rdi, [rdi + NODE_TYPE]
+    call    type_unsigned
+    pop     rdi
+    test    rax, rax
+    jz      .opcode_ready
+    lea     rcx, [unsigned_twin]
+    mov     rdx, rdi
+    sub     rdx, OP_BIN_FIRST
+    movzx   eax, byte [rcx + rdx]
+    test    eax, eax
+    jz      .opcode_ready               ; this one means the same either way
+    mov     rdi, rax
+.opcode_ready:
+    push    rdi
     call    code_op
     pop     rdi
-    cmp     rdi, OP_DIV                 ; only these two can fail, so only
-    je      .position                   ; these two carry a source column
+    cmp     rdi, OP_DIV                 ; only division can fail, so only
+    je      .position                   ; division carries a source column
     cmp     rdi, OP_MOD
+    je      .position
+    cmp     rdi, OP_UDIV
+    je      .position
+    cmp     rdi, OP_UMOD
     jne     .out
 
 ; A pointer would not survive being stored in four bytes; an offset does.
@@ -448,8 +472,9 @@ emit_node:
     call    code_patch
     jmp     .out
 
-; "return" with no expression still leaves a value, because RET expects one and
-; because every function is an int function until stage 3 says otherwise.
+; "return" with no expression still leaves a value, because RET expects one --
+; including in a void function, where the value is a zero nobody is allowed to
+; look at. The stack has to stay a stack whatever the type system says.
 .return:
     mov     rdi, [rbx + NODE_LHS]
     test    rdi, rdi
@@ -519,6 +544,18 @@ emit_node:
     pop     rbx
 .nothing:
     ret
+
+; A conversion is one opcode and the type to convert to. Nothing about it is
+; decided here: the parser worked out that it was needed and what it was for,
+; and this only writes it down.
+.conv:
+    mov     rdi, [rbx + NODE_LHS]
+    call    emit_node
+    mov     edi, OP_CONV
+    call    code_op
+    mov     rdi, [rbx + NODE_VAL]
+    call    code_u32
+    jmp     .out
 
 ; rbx = a node whose VAL is a slot and whose RHS says which storage it is
 emit_store:
@@ -633,6 +670,24 @@ emit_table:
     dq      emit_node.out               ; NT_EMPTY
     dq      emit_node.return            ; NT_RETURN
     dq      emit_node.icall             ; NT_INVOKE
+    dq      emit_node.conv              ; NT_CONV
+
+; Signed opcode minus OP_BIN_FIRST -> the unsigned opcode that means the same
+; thing for unsigned operands, or zero where there is no difference. Nine of
+; the sixteen are zero, and that is the point of the table: it says which
+; operators care about signedness and which genuinely do not.
+unsigned_twin:
+    db      0                           ; OP_MUL
+    db      OP_UDIV                     ; OP_DIV
+    db      OP_UMOD                     ; OP_MOD
+    db      0, 0, 0                     ; OP_ADD OP_SUB OP_SHL
+    db      OP_USHR                     ; OP_SHR
+    db      OP_ULT                      ; OP_LT
+    db      OP_UGT                      ; OP_GT
+    db      OP_ULE                      ; OP_LE
+    db      OP_UGE                      ; OP_GE
+    db      0, 0                        ; OP_EQ OP_NE
+    db      0, 0, 0                     ; OP_AND OP_XOR OP_OR
 
 ; ---------------------------------------------------------------------------
     section .bss
