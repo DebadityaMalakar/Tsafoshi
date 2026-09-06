@@ -239,6 +239,8 @@ session:
     jne     .loop
     mov     rdi, [parse_value]
     mov     rdi, [rdi + NODE_TYPE]
+    cmp     rdi, TY_VOID                ; a void expression has no answer, and
+    je      .loop                       ; printing "= 0" would invent one
     call    print_result
     jmp     .loop
 

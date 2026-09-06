@@ -63,6 +63,8 @@
     extern  fmt_i64
     extern  write_spaces
     extern  sys_write_stderr
+    extern  utf8_decode
+    extern  utf8_width
 
     section .text
 
@@ -290,9 +292,10 @@ err_report:
 
     mov     rdi, [err_pos]
     call    src_line_start
-    mov     rdi, [err_pos]
-    sub     rdi, rax
-    add     rdi, PROMPT_LEN
+    mov     rdi, rax
+    mov     rsi, [err_pos]
+    call    err_columns
+    lea     rdi, [rax + PROMPT_LEN]
     call    write_spaces
     jmp     .caret
 
@@ -323,9 +326,10 @@ err_report:
     call    sys_write_stderr
 
     pop     rcx
-    mov     rdi, [err_pos]
-    sub     rdi, rcx
-    add     rdi, msg_bar.len + 1        ; past the number and the separator
+    mov     rdi, rcx
+    mov     rsi, [err_pos]
+    call    err_columns
+    lea     rdi, [rax + msg_bar.len + 1] ; past the number and the separator
     call    write_spaces
 
 .caret:
@@ -343,6 +347,42 @@ err_report:
     mov     rdx, 1
     jmp     sys_write_stderr
 .none:
+    ret
+
+; rdi = the start of the line, rsi = a position in it -> rax = how far along
+; the line that position is *on a screen*.
+;
+; Not a byte count, which it used to be and which was right for as long as
+; every character was one byte. An emoji is four bytes and two columns, an
+; accented letter two bytes and one, and a variation selector two bytes and
+; none -- so the caret has to be told the difference or it lands somewhere
+; else entirely on any line that contains one.
+;
+; rbx = where we are, r12 = where to stop, r13 = the columns so far
+err_columns:
+    push    rbx
+    push    r12
+    push    r13
+    sub     rsp, 8
+    mov     rbx, rdi
+    mov     r12, rsi
+    xor     r13, r13
+.next:
+    cmp     rbx, r12
+    jae     .done
+    mov     rdi, rbx
+    call    utf8_decode
+    add     rbx, rdx
+    mov     rdi, rax
+    call    utf8_width
+    add     r13, rax
+    jmp     .next
+.done:
+    mov     rax, r13
+    add     rsp, 8
+    pop     r13
+    pop     r12
+    pop     rbx
     ret
 
 ; Reading a file rather than a prompt: no echo to point at, so print the line.

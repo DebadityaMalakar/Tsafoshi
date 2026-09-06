@@ -6,9 +6,10 @@ A **C99** interpreter written in x86-64 assembly. No compiler backend, no code
 generation, no ABI to fight — C source goes in, behaviour comes out. The host
 is hand-written assembly the whole way down.
 
-This is stage 2.3. It compiles to bytecode, runs it on a virtual machine, and
-has variables, control flow, lexical scope, and now functions with a real call
-stack — so it will run a C file, starting at `main`, and exit with what `main`
+This is stage 3.2. It compiles to bytecode, runs it on a virtual machine, and
+has variables, control flow, lexical scope, functions with a real call stack,
+a command line, and C's integer types with the conversion rules that go with
+them — so it will run a C file, starting at `main`, and exit with what `main`
 returned.
 
 ```sh
@@ -31,7 +32,7 @@ int main(void)
     return 0;
 }
 
-$ ./run.sh --build && ./build/tsafoshi examples/gcd.c
+$ make build && ./build/tsafoshi examples/gcd.c
 gcd(1071, 462) = 21
 ```
 
@@ -48,6 +49,10 @@ tsafoshi> fib(20)
 
 BODMAS by default, and the order is switchable — see [Order of
 operations](#order-of-operations).
+
+**[`DOCS.md`](DOCS.md) is the language reference**: what the syntax is today,
+and every place it departs from C99. This file is the project — how it is
+built, how it works inside, and where it is going.
 
 ---
 
@@ -1044,6 +1049,62 @@ tsafoshi> r
 = 42
 ```
 
+
+## Identifiers that are not ASCII
+
+Somebody was always going to type an emoji into a variable name to see what
+happened. This is what happens:
+
+```
+tsafoshi> int 💀 = 5;
+tsafoshi> 💀 * 💀
+= 25
+tsafoshi> :vars
+  int :skull = 5
+```
+
+An identifier may contain **any** non-ASCII character, and every one of them is
+transliterated to a Discord-style shortcode **in the lexer**, one codepoint at a
+time, before anything else sees it. `💀` becomes `:skull`; anything the table
+does not name becomes its codepoint in hex, so `café` is `caf:u00e9` and `你好`
+is `:u4f60:u597d`.
+
+The point is not the emoji. The point is that **the name table stays what it
+has always been** — fixed-width, ASCII, compared with one loop over bytes — so
+`names.asm`, the parser, the disassembler, `:vars` and every error message
+carry on knowing nothing about Unicode. Exactly two files have a notion of what
+a character is, and they are `utf8.asm` and `shortcode.asm`. The alternative
+was a name table that stores UTF-8, which would have grown that notion into a
+dozen places for a feature that is mostly a joke.
+
+The joke half is cheap. The half that is not a joke is that an unlisted
+codepoint still has to work, which is what the hex fallback is for, and that a
+name is *stable*: `:u1f4a9` is unique and will not change when the table gains
+an entry.
+
+Two details are deliberate. `❤️` and `❤` are the **same** identifier, because a
+variation selector says how to draw the character before it and is not part of
+anybody's name — which is what someone pasting out of a chat window will
+expect. And `👍` and `👍🏽` are **different** identifiers, because a skin tone is
+a real codepoint, and a language that quietly conflated them would be worse
+than one that refused both.
+
+The one place this reaches outside the lexer is the caret. A column on a screen
+stopped being a byte in a buffer the moment an emoji could appear in a line, so
+`err_report` counts columns rather than bytes — two for an emoji, one for an
+accented letter, none for a variation selector:
+
+```
+$ tsafoshi broken.c
+1 | printf("💀🔥🧠 %d\n", 1 / 0);
+                            ^
+error: division by zero
+```
+
+Strings never went through any of this and never needed to. The lexer only
+looks for the closing quote and the backslash, so UTF-8 inside a literal is
+bytes and passes through untouched — printing emoji has worked since stage 2.1.
+
 ## Bytecode
 
 The parser builds a tree, `compile.asm` flattens it to bytecode, and `vm.asm`
@@ -1246,6 +1307,8 @@ src/
     script.asm          running a file, a pipe or a -e, and reaching main
     readline.asm        buffered line input, and the multi-line submission
     lexer.asm           source text -> tokens, comments and all
+    utf8.asm            one UTF-8 sequence -> one codepoint, and its width
+    shortcode.asm       one codepoint -> an ASCII shortcode, Discord-style
     names.asm           identifier interning: text -> a stable slot
     scope.asm           lexical scope: a name -> the storage slot it means
     strings.asm         string literals: escapes, and an arena that interns
@@ -1272,6 +1335,7 @@ src/
   linux/readfile.asm    files and argv, Linux syscalls
   windows/input.asm     console I/O and isatty, Windows kernel32
   windows/readfile.asm  files and argv, Windows kernel32
+DOCS.md                 the language reference, and where it leaves C99
 tests/corpus.txt        the lines the two engines are diffed over
 tools/prettier.py       source layout normalizer
 Makefile                the build, and the only file that names a platform
@@ -1298,6 +1362,8 @@ The build is `src/main.asm` plus `src/core/*.asm` plus exactly one
 |---|---|
 | lexer → parser | `lex_init`, `lex_next`, and one token of lookahead in `tok_kind` / `tok_val` / `tok_pos` |
 | lexer → names, strings | `name_intern` and `str_intern` — a lexeme becomes a value in the lexer, so the parser never sees characters |
+| lexer → shortcode | `shortcode_of(codepoint, dest)` — an identifier is ASCII by the time it is interned, so nothing downstream has a notion of a character |
+| error → utf8 | `utf8_decode`, `utf8_width` — the only two things in the tree that know a byte is not a column |
 | parser → ast | `ast_num` / `ast_binary` / `ast_var` / `ast_call` and the rest, each returning a node or zero |
 | parser → mode | `mode_prec(kind)` and `mode_bump` — the parser never hardcodes an order |
 | parser → scope | `scope_declare(name)` and `scope_lookup(name)` — an identifier goes in, a storage slot comes out, once |

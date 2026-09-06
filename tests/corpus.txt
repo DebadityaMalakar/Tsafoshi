@@ -76,4 +76,15 @@ printf("%d %d %d\n", (char)200, (unsigned char)200, (short)-1)
 printf("%c%c%c\n", 72, 105, 33)
 printf("[%lu] [%ld]\n", (unsigned long)-1, -1L)
 printf("%d\n", sizeof(long))
+int 💀 = 5; 💀 * 💀
+int ☝😭 = 7; ☝😭
+int café = 3; café + 1
+int 你好 = 9; 你好
+int x🔥y = 2; x🔥y << 3
+int 🫩 = 1; 🫩
+int 👍🏽 = 4; 👍🏽
+int ❤️ = 6; ❤
+char 🧠 = 300; 🧠
+int sq💯(int n) { return n * n; } sq💯(9)
+printf("%s 💀\n", "emoji survive strings")
 :vars

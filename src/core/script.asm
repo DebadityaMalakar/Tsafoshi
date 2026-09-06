@@ -233,6 +233,8 @@ run_submission:
     jne     .to_main
     mov     rdi, [parse_value]
     mov     rdi, [rdi + NODE_TYPE]
+    cmp     rdi, TY_VOID                ; a void expression has no answer
+    je      .to_main
     call    print_result
 
 .to_main:

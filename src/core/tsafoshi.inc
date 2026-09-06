@@ -181,7 +181,16 @@ AST_CAP             equ 16384           ; nodes at once, then "too complex"
 ; Identifiers. Names are interned once and never released, so a slot is stable
 ; for the whole session and a variable survives the line that created it.
 NAME_CAP            equ 256             ; distinct identifiers per session
-NAME_LEN            equ 32              ; bytes per name, NUL included
+NAME_LEN            equ 64              ; bytes per name, NUL included
+
+; A name is always ASCII by the time it gets here, but the source it came from
+; need not have been: an identifier written with an emoji in it is
+; transliterated to a shortcode first, so a name that was four bytes on disk
+; can be seventeen in the table. That is what NAME_LEN has room for, and
+; IDENT_CAP is the scratch the lexer builds one in -- larger than NAME_LEN, so
+; an over-long name is caught by the length check rather than by running off
+; the end of a buffer.
+IDENT_CAP           equ NAME_LEN + 32
 
 ; Keywords and builtin functions occupy the first name slots, interned before
 ; any input is read, so recognising either is a compare against a constant.

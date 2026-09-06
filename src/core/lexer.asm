@@ -27,6 +27,8 @@
     extern  err_unterminated
     extern  err_unterminatedcomment
     extern  err_badchar
+    extern  utf8_decode
+    extern  shortcode_of
 
     section .text
 
@@ -323,10 +325,13 @@ lex_next:
     test    eax, eax
     jnz     .ident_more
     mov     [lex_cur], rdi
-    sub     rdi, rsi
+    sub     rdi, rsi                    ; rdi = how long it is
     mov     rdx, rsi
     mov     rsi, rdi
     mov     rdi, rdx
+    call    ident_ascii                 ; -> rax = text, rdx = length
+    mov     rdi, rax
+    mov     rsi, rdx
     mov     rdx, [tok_pos]
     call    name_intern
     cmp     rax, KW_COUNT               ; the reserved slots are the keywords
@@ -384,6 +389,78 @@ lex_next:
     mov     qword [tok_kind], TK_EOF
     ret
 
+; rdi = the identifier's bytes, rsi = how many -> rax = the text to intern,
+; rdx = its length.
+;
+; The same pointer straight back when it was already ASCII, which is every
+; identifier anybody has ever written and therefore the path worth keeping
+; free. Only when a byte turns up with its top bit set does anything get
+; copied, and then the whole identifier is rebuilt a codepoint at a time.
+;
+; What comes out is still an identifier and still ASCII, so names.asm, the
+; parser, the disassembler and every error message carry on knowing nothing
+; about any of this.
+ident_ascii:
+    xor     ecx, ecx
+.look:
+    cmp     rcx, rsi
+    jae     .plain
+    cmp     byte [rdi + rcx], 0x80
+    jae     translate
+    inc     rcx
+    jmp     .look
+.plain:
+    mov     rax, rdi
+    mov     rdx, rsi
+    ret
+
+; rbx = the source, r12 = its length, r13 = where we are in it, r14 = how much
+; has been written
+translate:
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    mov     rbx, rdi
+    mov     r12, rsi
+    xor     r13, r13
+    xor     r14, r14
+
+.next:
+    cmp     r13, r12
+    jae     .done
+    cmp     r14, NAME_LEN               ; past the limit, and names.asm will
+    ja      .done                       ; say so; stop before the buffer ends
+    lea     rdi, [rbx + r13]
+    movzx   eax, byte [rdi]
+    cmp     al, 0x80
+    jb      .plain_byte
+
+    call    utf8_decode
+    add     r13, rdx
+    mov     rdi, rax
+    lea     rsi, [ident_buf]
+    add     rsi, r14
+    call    shortcode_of
+    add     r14, rax
+    jmp     .next
+
+.plain_byte:
+    lea     rcx, [ident_buf]
+    mov     [rcx + r14], al
+    inc     r14
+    inc     r13
+    jmp     .next
+
+.done:
+    lea     rax, [ident_buf]
+    mov     rdx, r14
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    ret
+
 ; cl = character -> ecx = its value as a hexadecimal digit, or -1
 hex_digit:
     cmp     cl, '0'
@@ -406,7 +483,14 @@ hex_digit:
 
 ; al = character -> eax = 1 if it may begin an identifier. Underscore sits
 ; between the two letter ranges, so it is tested on its own.
+; Anything with its top bit set counts, which is every byte of every UTF-8
+; sequence. C99 leaves it to the implementation which "other characters" may
+; appear in an identifier, and this implementation's answer is all of them --
+; the transliteration happens afterwards, so the scanner only has to agree on
+; where the name ends.
 ident_start:
+    cmp     al, 0x80
+    jae     .yes
     cmp     al, '_'
     je      .yes
     mov     ecx, eax
@@ -491,3 +575,5 @@ tok_pos:
     resq    1
 tok_type:
     resq    1
+ident_buf:
+    resb    IDENT_CAP
